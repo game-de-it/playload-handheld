@@ -1,0 +1,15 @@
+# Changelog
+
+## 1.0.0
+
+First public release.
+
+- Runs Playload game URLs (`.url` files) offline on plumOS handhelds as a PortMaster-style port.
+- Two JavaScript runtimes: Node.js (V8, default) and QuickJS-ng (built in, used as a fallback).
+- Native rasterizer and native AY-3-8910 sound chip; Playload's own `engine.js`, `sound.js` and `glyphs.js` run unmodified apart from load-time patches.
+- OpenGL ES presentation with Playload's CRT shader (optional).
+- Game menu that remembers the last game; settings for button layout (Nintendo / Xbox), CRT, engine version and runtime.
+- In-app update of the Playload engine from tagged GitHub releases, with a self-test before switching.
+- Performance overlay (SELECT+L1).
+- Built-in Playload engine: v0.9.2.
+- Tested on RK3566 (plumOS-Bubble), RK3326 (GKD Pixel2) and A133P (V90S).

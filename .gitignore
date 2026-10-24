@@ -1,0 +1,11 @@
+# Build output and release archives
+build/
+dist/
+# Generated when packaging (see tools/package.sh)
+port/playload/playload.aarch64
+port/playload/node/
+port/playload/playload.cfg
+port/playload/engine/
+port/playload/log.txt
+.DS_Store
+vendor/sdl2/libSDL2.so
