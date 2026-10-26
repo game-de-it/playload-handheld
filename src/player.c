@@ -37,7 +37,7 @@
 #include "video.h"
 #endif
 
-#define PLAYLOAD_HANDHELD_VERSION "1.0.0"
+#define PLAYLOAD_HANDHELD_VERSION "1.0.1"
 #define W 160
 #define H 144
 
