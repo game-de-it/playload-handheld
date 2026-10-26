@@ -112,8 +112,9 @@ Sounds: u16 count, then per sound u8 channel, u8 fixed-volume flag, u32 event co
 ### Engine versions and the in-app updater
 
 - `builtin` is embedded in the binary (and copied to `node/builtin/` for Node.js). Downloaded versions live in `engine/<tag>/`.
-- **ENGINE → A**: fetch the newest tag from `api.github.com/repos/kitao/playload/tags` (plumOS's `curl`, with a clean environment), download the four files at that commit into `engine/.new`, run the self-test, then rename to `engine/<tag>` and select it. An existing complete version is reused.
-- **Self-test**: an API smoke game (every Playload function and variable; checks that text is actually drawn) plus every game in `games/` run silently for 300 ticks with scripted input, in QuickJS. A version passes only if nothing throws and every frame went through the native rasterizer.
+- **ENGINE → A**: fetch the newest tag from `api.github.com/repos/kitao/playload/tags` (plumOS's `curl`, with a clean environment), download the four files at that commit into `engine/.new` (one `curl` call, one connection), run the self-test, then rename to `engine/<tag>` and select it. An existing complete version is reused.
+- **Self-test**: an API smoke game (every Playload function and variable; checks that text is actually drawn) plus up to six games from `games/` (bundled games first), run silently with scripted input in QuickJS: 300 ticks each, or 1.5 s after the first 30 ticks, whichever comes first. A version passes only if nothing throws and every frame went through the native rasterizer. The menu shows `DOWNLOAD` and `TEST n/m` in the bottom right corner meanwhile.
+  Running every game in full took up to minutes (13 games on RK3566: 89 s, of which rubble. alone 43 s); the bounded test takes 7 s, and the whole update about 9 s.
 - Only the JavaScript side can be updated this way. Changes to Playload's sound synthesis (`ay.c`) or URL format (`inflate.c`) need a new player build.
 
 ## Load-time patches

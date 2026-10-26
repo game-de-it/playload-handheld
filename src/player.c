@@ -37,7 +37,7 @@
 #include "video.h"
 #endif
 
-#define PLAYLOAD_HANDHELD_VERSION "1.0.1"
+#define PLAYLOAD_HANDHELD_VERSION "1.0.2"
 #define W 160
 #define H 144
 
@@ -642,7 +642,7 @@ static const char *menu_source =
     "  if (sel === N + 1 && change) __native.crt(1 - __native.crt());\n"
     "  if (sel === N + 3 && change) __native.runtime(1 - __native.runtime());\n"
     "  if (sel === N + 2 && btnp(4)) {\n"
-    "    msg = 'CHECKING UPDATE...';\n"
+    "    msg = 'UPDATING...';\n"
     "    updating = 2;\n"
     "  } else if (sel === N + 2 && h) {\n"
     "    const { current, list } = __native.engine();\n"
@@ -799,8 +799,8 @@ static void vm_free(JSContext *ctx) {
 //
 // The updater takes the newest tagged Playload release from GitHub, downloads
 // engine.js, sound.js, glyphs.js and crt.js at that commit into engine/.new,
-// and runs every game in games/ (plus an API smoke test) silently for a few
-// seconds. Only if all of them run without errors, and draw through the native
+// and runs an API smoke test and up to six games from games/ silently for a
+// second or two each (see selftest()). Only if all of them run without errors, and draw through the native
 // rasterizer, does it become engine/<tag> and the selected version. Versions
 // stay installed, so the menu can switch back to an older one or to "builtin".
 
@@ -955,20 +955,46 @@ static const char *smoke_game =
     "  if (btnp(4) || btn(0)) play(1, 'V5O6N1c');\n"
     "}\n";
 
-// Runs one game silently for `frames` frames. Returns NULL or an error message.
-static const char *selftest_game(const char *label, const char *source, int frames, char *err,
-                                 size_t errlen) {
+static uint8_t update_screen[W * H];
+#ifdef HAVE_SDL
+static void show_progress(const char *text);
+#endif
+static void update_progress(const char *text) {
+  printf("update: %s\n", text);
+  fflush(stdout);
+#ifdef HAVE_SDL
+  show_progress(text);
+#endif
+}
+
+// The self-test runs the API smoke test and at most SELFTEST_GAMES games
+// (the bundled ones first), each until SELFTEST_MS have passed after its
+// first SELFTEST_MIN_FRAMES frames, or for 300 frames. Running every game in
+// full took minutes with heavy games in QuickJS (rubble. alone: 43 s on RK3566).
+#define SELFTEST_GAMES 6
+#define SELFTEST_MS 1500
+#define SELFTEST_MIN_FRAMES 30
+static const char *bundled_games[] = {"brr3kb.url", "shooter.url", "glyph-quest.url",
+                                      "jump.url",   "snake.url",   "chiptune.url"};
+
+// Runs one game silently for up to `frames` frames, or until `max_ms` have
+// passed after SELFTEST_MIN_FRAMES. Returns NULL or an error message.
+static const char *selftest_game(const char *label, const char *source, int frames, double max_ms,
+                                 char *err, size_t errlen) {
   JSContext *ctx = vm_new(current_options);
   if (!ctx) {
     snprintf(err, errlen, "%s: engine failed to load", label);
     return err;
   }
   const long before = raster_calls;
-  int failed = call_start(ctx, source, NULL);
-  for (int i = 0; !failed && i < frames; i++)
-    failed = call_frame(ctx, ((i / 15) % 2 ? 16 : 0) | (1 << ((i / 40) % 4)));
+  const double t0 = now_ms();
+  int failed = call_start(ctx, source, NULL), ran = 0;
+  for (; !failed && ran < frames; ran++) {
+    if (ran >= SELFTEST_MIN_FRAMES && now_ms() - t0 > max_ms) break;
+    failed = call_frame(ctx, ((ran / 15) % 2 ? 16 : 0) | (1 << ((ran / 40) % 4)));
+  }
   if (failed) snprintf(err, errlen, "%s: %s", label, take_error(ctx));
-  else if (raster_calls - before != frames + 1) {
+  else if (raster_calls - before != ran + 1) {
     snprintf(err, errlen, "%s: render not native", label);
     failed = 1;
   }
@@ -982,7 +1008,21 @@ static const char *selftest(const char *dir, char *err, size_t errlen) {
   const char *saved_dir = module_dir;
   module_dir = dir;
   mute_sounds = 1;
-  const char *result = selftest_game("SMOKE", smoke_game, 120, err, errlen);
+  // Bundled games first, then the rest in menu order.
+  int order[MAX_GAMES], tests = 0;
+  for (int pass = 0; pass < 2; pass++)
+    for (int i = 0; i < game_count && tests < SELFTEST_GAMES; i++) {
+      const char *base = strrchr(game_paths[i], '/');
+      base = base ? base + 1 : game_paths[i];
+      int bundled = 0;
+      for (size_t b = 0; b < sizeof bundled_games / sizeof *bundled_games; b++)
+        bundled |= !strcmp(base, bundled_games[b]);
+      if (bundled == !pass) order[tests++] = i;
+    }
+  char step[24];
+  snprintf(step, sizeof step, "TEST 1/%d", tests + 1);
+  update_progress(step);
+  const char *result = selftest_game("SMOKE", smoke_game, 120, 1e9, err, errlen);
   if (!result) {
     // "SELF TEST" is drawn in ink 7 on text row 1; glyphs must actually show up.
     int ink = 0;
@@ -993,12 +1033,15 @@ static const char *selftest(const char *dir, char *err, size_t errlen) {
       result = err;
     }
   }
-  for (int i = 0; !result && i < game_count; i++) {
+  for (int t = 0; !result && t < tests; t++) {
+    const int i = order[t];
+    snprintf(step, sizeof step, "TEST %d/%d", t + 2, tests + 1);
+    update_progress(step);
     char load_err[128];
     char *source = load_game(game_paths[i], load_err, sizeof load_err);
     if (!source) continue;  // a broken URL file is not the engine's fault
     const char *base = strrchr(game_paths[i], '/');
-    result = selftest_game(base ? base + 1 : game_paths[i], source, 300, err, errlen);
+    result = selftest_game(base ? base + 1 : game_paths[i], source, 300, SELFTEST_MS, err, errlen);
     free(source);
   }
   mute_sounds = 0;
@@ -1011,7 +1054,8 @@ static const char *selftest(const char *dir, char *err, size_t errlen) {
 
 // Returns a short status line for the menu (at most 18 characters).
 static const char *update_engine(char *msg, size_t len) {
-  char json[16384], tag[64] = "", sha[64] = "", cmd[1024];
+  char json[16384], tag[64] = "", sha[64] = "", cmd[2048];
+  memcpy(update_screen, framebuffer, sizeof update_screen);
   const char *curl = curl_command();
   snprintf(cmd, sizeof cmd, "%s -fsSL -m 20 https://api.github.com/repos/kitao/playload/tags",
            curl);
@@ -1032,13 +1076,15 @@ static const char *update_engine(char *msg, size_t len) {
   static const char *sources[4] = {"src/engine/engine.js", "src/engine/sound.js",
                                    "src/engine/glyphs.js", "src/app/crt.js"};
   run_capture("rm -rf " ENGINE_ROOT "/.new && mkdir -p " ENGINE_ROOT "/.new", NULL, 0);
-  for (int i = 0; i < 4; i++) {
-    snprintf(cmd, sizeof cmd,
-             "%s -fsSL -m 60 -o " ENGINE_ROOT "/.new/%s "
-             "https://raw.githubusercontent.com/kitao/playload/%s/%s",
-             curl, engine_files[i], sha, sources[i]);
-    if (run_capture(cmd, NULL, 0) != 0) return snprintf(msg, len, "DOWNLOAD FAILED"), msg;
-  }
+  // One curl for all four files, so they share one connection.
+  update_progress("DOWNLOAD");
+  int n = snprintf(cmd, sizeof cmd, "%s -fsSL -m 60", curl);
+  for (int i = 0; i < 4; i++)
+    n += snprintf(cmd + n, sizeof cmd - (size_t)n,
+                  " -o " ENGINE_ROOT "/.new/%s https://raw.githubusercontent.com/kitao/playload/%s/%s",
+                  engine_files[i], sha, sources[i]);
+  if (n >= (int)sizeof cmd || run_capture(cmd, NULL, 0) != 0)
+    return snprintf(msg, len, "DOWNLOAD FAILED"), msg;
   FILE *v = fopen(ENGINE_ROOT "/.new/VERSION", "w");
   if (v) {
     fprintf(v, "%s %s\n", tag, sha);
@@ -1231,15 +1277,16 @@ static int read_input(int *running) {
 
 // Performance overlay: a 3x5 pixel font drawn over a copy of the frame, so the
 // game's own picture is never touched.
-static const char *osd_chars = "0123456789.FPSTMAX ";
+static const char *osd_chars = "0123456789.FPSTMAX DEGILNOW/";
 static const uint16_t osd_font[] = {
     0x7B6F, 0x2C97, 0x73E7, 0x73CF, 0x5BC9, 0x79CF, 0x79EF, 0x7249, 0x7BEF, 0x7BCF,  // 0-9
     0x0002, 0x79E4, 0x7BE4, 0x79CF, 0x7492, 0x5F6D, 0x2BED, 0x5AAD, 0x0000,          // . F P S T M A X space
+    0x6B6E, 0x79E7, 0x796F, 0x7497, 0x4927, 0x6B6D, 0x7B6F, 0x5BFD, 0x12A4,          // D E G I L N O W /
 };
 static char osd_text[2][24];
 
-static void osd_draw(uint8_t *pix, int line, const char *text) {
-  const int len = (int)strlen(text), x0 = 1, y0 = 1 + line * 7;
+static void osd_print(uint8_t *pix, int x0, int y0, const char *text) {
+  const int len = (int)strlen(text);
   for (int y = y0 - 1; y < y0 + 6; y++)
     for (int x = x0 - 1; x < x0 + len * 4; x++) pix[y * W + x] = 0;
   for (int i = 0; i < len; i++) {
@@ -1251,6 +1298,8 @@ static void osd_draw(uint8_t *pix, int line, const char *text) {
   }
 }
 
+static void osd_draw(uint8_t *pix, int line, const char *text) { osd_print(pix, 1, 1 + line * 7, text); }
+
 static void present(void) {
   if (!fps_on) {
     video_present(framebuffer, crt_on);
@@ -1261,6 +1310,17 @@ static void present(void) {
   osd_draw(shown, 0, osd_text[0]);
   osd_draw(shown, 1, osd_text[1]);
   video_present(shown, crt_on);
+}
+
+// The updater's progress, in the bottom right corner of the menu as it was
+// when the update started (the self-test renders games into framebuffer).
+static void show_progress(const char *text) {
+  if (!video_ready()) return;
+  static uint8_t shown[W * H];
+  memcpy(shown, update_screen, sizeof shown);
+  osd_print(shown, W - 1 - (int)strlen(text) * 4, 130, text);
+  video_present(shown, crt_on);
+  SDL_PumpEvents();
 }
 
 static void reset_audio(void) {

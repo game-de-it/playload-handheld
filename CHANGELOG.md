@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.2
+
+- Faster in-app engine update: the self-test now runs the API smoke test and up to six games (bundled games first) for at most about 1.5 seconds each, instead of every game for 300 ticks. On RK3566 with 13 games the update went from about 2 minutes to about 9 seconds.
+- The update shows its progress (`DOWNLOAD`, `TEST n/m`) in the bottom right corner of the menu.
+- The four engine files are downloaded with one `curl` call.
+
 ## 1.0.1
 
 - Read pattern bytes directly from Playload 0.9.3's engine, whose `pcg[chr].pat` is now an edit-counting Proxy (about 3× faster rendering in QuickJS than reading through it). Rendering stays pixel-identical with Playload 0.9.2 and 0.9.3.
