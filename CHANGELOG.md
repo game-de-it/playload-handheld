@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Read pattern bytes directly from Playload 0.9.3's engine, whose `pcg[chr].pat` is now an edit-counting Proxy (about 3× faster rendering in QuickJS than reading through it). Rendering stays pixel-identical with Playload 0.9.2 and 0.9.3.
+- Bit-Rate Rush 3KB: draw text with `put()` and keep sprites within 128 per frame, so the level-up screen shows on Playload 0.9.3 and later.
+
 ## 1.0.0
 
 First public release.

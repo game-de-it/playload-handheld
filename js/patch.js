@@ -75,6 +75,8 @@ function functionRange(source, start) {
 // engine.js rasterizes every pixel in JS, which is too slow for QuickJS on a
 // handheld. Its render() is replaced by one that hands the screen cells and
 // sprites to the native rasterizer (globalThis.__nativeRender, see host.js).
+// Since Playload 0.9.3, pcg[chr].pat is a Proxy that counts edits; the
+// renderer reads the engine's private pattern bytes (its patterns WeakMap).
 globalThis.__patchModule = (name, source) => {
   if (name !== 'engine.js') return source;
   // Optional speed-up: remember characterKey() results. Games pass the same
@@ -101,7 +103,8 @@ globalThis.__patchModule = (name, source) => {
   if (!range) throw new Error('engine.js: render() not found');
   return (
     source.slice(0, range[0]) +
-    'function render() {\n    return globalThis.__nativeRender(scr, sprites, lookup, pixels);\n  }' +
+    'function render() {\n    return globalThis.__nativeRender(scr, sprites, lookup, pixels,\n' +
+      '      typeof patterns === "undefined" ? null : patterns);\n  }' +
     source.slice(range[1])
   );
 };

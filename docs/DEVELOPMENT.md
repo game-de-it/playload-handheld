@@ -122,7 +122,7 @@ Playload's files are never edited on disk; they are adapted when loaded. Optiona
 
 | Patch | Runtime | Required | Why |
 |---|---|---|---|
-| `render()` → native rasterizer (screen cells + sprites) | both | QuickJS: yes; Node.js: no (falls back to Playload's renderer) | Playload rasterizes every pixel in JS: 22–24 ms per frame in QuickJS, 23 ms for 10,000 sprites in Node.js on RK3566 |
+| `render()` → native rasterizer (screen cells + sprites) | both | QuickJS: yes; Node.js: no (falls back to Playload's renderer) | Playload rasterizes every pixel in JS: 22–24 ms per frame in QuickJS, 23 ms for 10,000 sprites in Node.js on RK3566. Since 0.9.3, `pcg[chr].pat` is a Proxy that counts edits; the native renderer reads the engine's private `patterns` WeakMap instead (reading the Proxy made BRR 3KB about 3× slower in QuickJS) |
 | `characterKey()` memoized (throws are not cached) | both | no | Every `spr()`/`put()` normalizes, matches and segments its string |
 | `Intl.Segmenter` results cached per string | both | — | QuickJS has no `Intl` (replaced by an approximation); in Node.js, ICU segmentation dominated `put()`-heavy games |
 | `String.prototype.normalize` cached | QuickJS | — | Same strings every tick |

@@ -14,14 +14,16 @@ const cells = new Uint8Array(20 * 18 * 10);
 let spritePos = new Int32Array(3 * 1024),
   spritePat = new Uint8Array(8 * 1024);
 
-globalThis.__nativeRender = (scr, sprites, lookup, pixels) => {
+// patterns: engine.js's element -> private pattern bytes (0.9.3+), or null.
+globalThis.__nativeRender = (scr, sprites, lookup, pixels, patterns) => {
+  const patOf = patterns ? (element) => patterns.get(element) : (element) => element.pat;
   let i = 0;
   for (const row of scr)
     for (const element of row) {
       const character = lookup(element.chr),
         own = element.col,
         standard = character.col;
-      cells.set(character.pat, i);
+      cells.set(patOf(character), i);
       cells[i + 8] = own[0] ?? standard[0];
       cells[i + 9] = own[1] ?? standard[1];
       i += 10;
@@ -35,7 +37,7 @@ globalThis.__nativeRender = (scr, sprites, lookup, pixels) => {
     spritePos[n * 3] = sprite.x;
     spritePos[n * 3 + 1] = sprite.y;
     spritePos[n * 3 + 2] = sprite.col;
-    spritePat.set(lookup(sprite.chr).pat, n * 8);
+    spritePat.set(patOf(lookup(sprite.chr)), n * 8);
     n++;
   }
   native.raster(cells, spritePos, spritePat, n);

@@ -118,7 +118,8 @@ async function importEngine() {
   if (range) {
     let patched =
       source.slice(0, range[0]) +
-      'function render() {\n    return globalThis.__nativeRender(scr, sprites, lookup, pixels);\n  }' +
+      'function render() {\n    return globalThis.__nativeRender(scr, sprites, lookup, pixels,\n' +
+      '      typeof patterns === "undefined" ? null : patterns);\n  }' +
       source.slice(range[1]);
     // Reading colors through colorPair's Proxy costs ~8 ms per frame for the 360
     // cells. Keep each pair's plain values array so the renderer can read it
@@ -152,7 +153,21 @@ let cellColors = null;
 // slow. Elements keep their identity (and their live pat/col arrays), so the
 // renderer remembers them and never touches that table in its loops.
 const elements = new Map();
-let lookupElement = null;
+let lookupElement = null,
+  privatePatterns = null;
+// Character -> its pattern bytes. Since Playload 0.9.3, element.pat is a Proxy
+// that counts edits (slow to read); the engine's private bytes are used instead.
+// Both keep their identity, as pcg edits write into them.
+const patterns = new Map();
+const patternOf = (chr) => {
+  let pattern = patterns.get(chr);
+  if (pattern === undefined) {
+    const element = elementOf(chr);
+    pattern = privatePatterns ? privatePatterns.get(element) : element.pat;
+    patterns.set(chr, pattern);
+  }
+  return pattern;
+};
 const elementOf = (chr) => {
   let element = elements.get(chr);
   if (element === undefined) {
@@ -170,18 +185,19 @@ let screen = null,
   spriteY = new Int16Array(spriteCapacity),
   spriteId = new Uint16Array(spriteCapacity),
   spriteCol = new Uint8Array(spriteCapacity);
-globalThis.__nativeRender = (scr, sprites, lookup, pixels) => {
+globalThis.__nativeRender = (scr, sprites, lookup, pixels, enginePatterns) => {
   // Screen cells and their color pairs never change identity: resolve them once.
   if (!cellColors) cellColors = scr.flatMap((row) => row.map((element) => colorsOf(element.col)));
   lookupElement = lookup;
+  privatePatterns = enginePatterns;
   let i = 0,
     k = 0;
   for (const row of scr)
     for (const element of row) {
-      const character = elementOf(element.chr),
+      const chr = element.chr,
         own = cellColors[k++],
-        standard = colorsOf(character.col);
-      cells.set(character.pat, i);
+        standard = colorsOf(elementOf(chr).col);
+      cells.set(patternOf(chr), i);
       cells[i + 8] = own[0] ?? standard[0];
       cells[i + 9] = own[1] ?? standard[1];
       i += 10;
@@ -207,7 +223,7 @@ globalThis.__nativeRender = (scr, sprites, lookup, pixels) => {
     if (id === undefined) {
       id = patternList.length;
       patternIds.set(chr, id);
-      patternList.push(elementOf(chr).pat);
+      patternList.push(patternOf(chr));
     }
     spriteX[n] = x;
     spriteY[n] = y;

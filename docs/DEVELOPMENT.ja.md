@@ -120,7 +120,7 @@ Playload の6つのボタンをマスクに変換します（上 1、下 2、左
 
 | 差し替え | 対象 | 必須か | 理由 |
 |---|---|---|---|
-| `render()` をネイティブのラスタライザ向けに（画面のマス＋スプライト） | 両方 | QuickJS：必須。Node.js：任意（できなければ本家の描画） | 本家は全画素を JS で塗る。RK3566 で QuickJS は 22〜24ms、Node.js は1万スプライトで 23ms |
+| `render()` をネイティブのラスタライザ向けに（画面のマス＋スプライト） | 両方 | QuickJS：必須。Node.js：任意（できなければ本家の描画） | 本家は全画素を JS で塗る。RK3566 で QuickJS は 22〜24ms、Node.js は1万スプライトで 23ms。0.9.3 から `pcg[chr].pat` は書き換え回数を数える Proxy になったため、エンジン内部の `patterns`（WeakMap）から生のパターンを読む（Proxy 経由だと QuickJS で BRR 3KB が約3倍遅くなった） |
 | `characterKey()` の結果を記憶（例外になる入力は記憶しない） | 両方 | 任意 | `spr()`／`put()` のたびに文字列の正規化・照合・区切りを行うため |
 | `Intl.Segmenter` の結果を文字列ごとにキャッシュ | 両方 | — | QuickJS には `Intl` がない（近似で代替）。Node.js では ICU の区切り処理が `put()` の多いゲームの大半を占めた |
 | `String.prototype.normalize` をキャッシュ | QuickJS | — | 毎 tick 同じ文字列のため |
