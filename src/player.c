@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
+#include <pthread.h>
 #include <unistd.h>
 #include <strings.h>
 #include <ctype.h>
@@ -50,7 +51,10 @@ static const uint32_t palette[8] = {0x000000, 0x55415f, 0x646964, 0xd77355,
 // (8 pattern rows, ink, paper) and sprites (x, y, col + 8 pattern rows).
 
 static uint8_t framebuffer[W * H];
-static long raster_calls;  // counts frames drawn natively (the updater's self-test checks it)
+// Per thread (the Arcade preview runs a game on its own thread): where the
+// rasterizer draws, and how many frames it drew (the updater's self-test checks it).
+static __thread uint8_t *raster_target = framebuffer;
+static __thread long raster_calls;
 
 // glitch: Playload 0.9.4's overflow noise, XORed over the frame (NULL: none).
 static void raster(const uint8_t *cells, const int32_t *pos, const uint8_t *pat, int sprites,
@@ -61,7 +65,7 @@ static void raster(const uint8_t *cells, const int32_t *pos, const uint8_t *pat,
       const uint8_t *cell = cells + (cy * 20 + cx) * 10;
       const uint8_t c1 = cell[8] & 7, c2 = cell[9] & 7;
       for (int row = 0; row < 8; row++) {
-        uint8_t *out = framebuffer + (cy * 8 + row) * W + cx * 8;
+        uint8_t *out = raster_target + (cy * 8 + row) * W + cx * 8;
         const uint8_t bits = cell[row];
         for (int bit = 0; bit < 8; bit++) out[bit] = bits & (128 >> bit) ? c1 : c2;
       }
@@ -76,12 +80,12 @@ static void raster(const uint8_t *cells, const int32_t *pos, const uint8_t *pat,
       if (py < 0 || py >= H || !pattern[row]) continue;
       for (int bit = 0; bit < 8; bit++) {
         const int px = x + bit;
-        if (px >= 0 && px < W && (pattern[row] & (128 >> bit))) framebuffer[py * W + px] = col;
+        if (px >= 0 && px < W && (pattern[row] & (128 >> bit))) raster_target[py * W + px] = col;
       }
     }
   }
   if (glitch)
-    for (int i = 0; i < W * H; i++) framebuffer[i] ^= glitch[i] & 7;
+    for (int i = 0; i < W * H; i++) raster_target[i] ^= glitch[i] & 7;
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +168,7 @@ static JSValue js_print(JSContext *ctx, JSValueConst this_val, int argc, JSValue
   return JS_UNDEFINED;
 }
 
-static int mute_sounds;  // the updater's self-test runs games silently
+static __thread int mute_sounds;  // the updater's self-test and the Arcade preview run games silently
 
 // Rasterizes a screen sent by node-host.mjs (see NodeRasterFn).
 static void node_raster(uint8_t *pixels, const uint8_t *cells, const uint8_t *patterns,
@@ -278,7 +282,7 @@ static JSModuleDef *load_module(JSContext *ctx, const char *name, void *opaque) 
   return m;
 }
 
-static char error_text[1024];
+static __thread char error_text[1024];
 
 static const char *take_error(JSContext *ctx) {
   JSValue ex = JS_GetException(ctx);
@@ -308,7 +312,7 @@ static int run_jobs(JSContext *ctx) {
   return r;
 }
 
-static JSValue start_fn, frame_fn, error_fn;
+static __thread JSValue start_fn, frame_fn, error_fn;  // of the thread's current game
 static JSValue js_launch(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_layout(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_crt(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
@@ -371,7 +375,7 @@ static int setup_js(JSContext *ctx) {
 }
 
 // Frames the last tick asked to wait (Playload 0.9.4+: one per exceeded limit).
-static int tick_delay;
+static __thread int tick_delay;
 
 static void take_delay(JSContext *ctx, JSValue r) {
   int32_t d = 0;
@@ -1179,97 +1183,90 @@ static JSValue js_state(JSContext *ctx, JSValueConst this_val, int argc, JSValue
   return JS_NewString(ctx, menu_state);
 }
 
-// The preview runs the game silently in its own QuickJS runtime, one tick per
-// menu tick, and shows it at half size at (PREVIEW_X, PREVIEW_Y). A game too
-// heavy for that (a tick over PREVIEW_MS) stays on its last frame.
+// The preview runs the game silently in its own QuickJS runtime on its own
+// thread, at up to 60 ticks per second with no input, so a heavy game only
+// runs slower in the preview and never holds up the menu.
 #define PREVIEW_X 40
 #define PREVIEW_Y 24
-#define PREVIEW_MS 40
-static JSContext *preview_ctx;
-static JSValue preview_fns[3];
-static uint8_t preview_pixels[W * H];
-static int preview_ready, preview_frozen;
+static pthread_t preview_thread;
+static int preview_running;
+static volatile int preview_quit;
+static pthread_mutex_t preview_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t preview_pixels[W * H];  // the latest frame, under preview_lock
+static int preview_ready;
 
-// The JS entry points are globals of the player; swap the menu's and the preview's.
-static void swap_entry_points(void) {
-  const JSValue keep[3] = {start_fn, frame_fn, error_fn};
-  start_fn = preview_fns[0];
-  frame_fn = preview_fns[1];
-  error_fn = preview_fns[2];
-  memcpy(preview_fns, keep, sizeof keep);
+static int preview_interrupt(JSRuntime *rt, void *opaque) { return preview_quit; }
+
+static void *preview_main(void *arg) {
+  char *source = arg;
+  uint8_t *own = calloc(W * H, 1);
+  raster_target = own;
+  mute_sounds = 1;
+  JSContext *ctx = own ? vm_new(current_options) : NULL;
+  if (ctx) {
+    // Stop a long tick (or an endless loop) as soon as the preview closes.
+    JS_SetInterruptHandler(JS_GetRuntime(ctx), preview_interrupt, NULL);
+    int failed = call_start(ctx, source, NULL);
+    double next = now_ms();
+    while (!failed && !preview_quit) {
+      pthread_mutex_lock(&preview_lock);
+      memcpy(preview_pixels, own, sizeof preview_pixels);
+      preview_ready = 1;
+      pthread_mutex_unlock(&preview_lock);
+      next += 1000.0 / 60;
+      const double now = now_ms();
+      if (next > now) usleep((useconds_t)((next - now) * 1000));
+      else next = now;  // behind: a heavy game just runs slower
+      failed = call_frame(ctx, 0);
+    }
+    if (failed && !preview_quit) printf("preview: %s\n", take_error(ctx));
+    vm_free(ctx);
+  }
+  free(own);
+  free(source);
+  return NULL;
 }
 
 static void preview_stop(void) {
-  if (!preview_ctx) return;
-  swap_entry_points();
-  vm_free(preview_ctx);  // frees the preview's entry points, now in the globals
-  start_fn = preview_fns[0];
-  frame_fn = preview_fns[1];
-  error_fn = preview_fns[2];
-  preview_ctx = NULL;
+  if (!preview_running) return;
+  preview_quit = 1;
+  pthread_join(preview_thread, NULL);
+  preview_running = 0;
   preview_ready = 0;
-}
-
-// Runs the preview's start (source given) or next tick, keeping the menu's picture.
-static void preview_tick(const char *source) {
-  static uint8_t menu[W * H];
-  memcpy(menu, framebuffer, sizeof menu);
-  swap_entry_points();
-  mute_sounds = 1;
-  const double t0 = now_ms();
-  const int failed = source ? call_start(preview_ctx, source, NULL) : call_frame(preview_ctx, 0);
-  const double ms = now_ms() - t0;
-  mute_sounds = 0;
-  swap_entry_points();
-  if (failed) {
-    printf("preview: %s\n", take_error(preview_ctx));
-    preview_frozen = 1;
-  } else {
-    memcpy(preview_pixels, framebuffer, sizeof preview_pixels);
-    preview_ready = 1;
-    if (ms > PREVIEW_MS) preview_frozen = 1;
-  }
-  memcpy(framebuffer, menu, sizeof menu);
 }
 
 // __native.preview(url): shows that game; "" stops the preview.
 static JSValue js_preview(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   preview_stop();
   const char *url = JS_ToCString(ctx, argv[0]);
-  if (url && url[0]) {
-    char err[128];
-    char *source = decode_game(strdup(url), err, sizeof err);
-    const JSValue menu[3] = {start_fn, frame_fn, error_fn};
-    JSContext *game = source ? vm_new(current_options) : NULL;
-    if (game) {
-      preview_fns[0] = start_fn;
-      preview_fns[1] = frame_fn;
-      preview_fns[2] = error_fn;
-      preview_ctx = game;
-      preview_frozen = 0;
-    }
-    start_fn = menu[0];
-    frame_fn = menu[1];
-    error_fn = menu[2];
-    if (game) preview_tick(source);
-    free(source);
-  }
+  char err[128];
+  char *source = url && url[0] ? decode_game(strdup(url), err, sizeof err) : NULL;
   JS_FreeCString(ctx, url);
+  if (source) {
+    preview_quit = 0;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 16 << 20);  // QuickJS is allowed 4 MB of stack
+    preview_running = pthread_create(&preview_thread, &attr, preview_main, source) == 0;
+    pthread_attr_destroy(&attr);
+    if (!preview_running) free(source);
+  }
   return JS_UNDEFINED;
 }
 
-// Called after each menu tick: advances the preview and draws it over the menu,
+// Called after each menu tick: draws the preview's latest frame over the menu,
 // halved (of each 2x2 block, the first non-black pixel, so thin lines survive).
 static void preview_frame(void) {
-  if (!preview_ctx) return;
-  if (!preview_frozen) preview_tick(NULL);
-  if (!preview_ready) return;
-  for (int y = 0; y < H / 2; y++)
+  if (!preview_running) return;
+  pthread_mutex_lock(&preview_lock);
+  const int ready = preview_ready;
+  for (int y = 0; ready && y < H / 2; y++)
     for (int x = 0; x < W / 2; x++) {
       const uint8_t *p = preview_pixels + y * 2 * W + x * 2;
       const uint8_t c = p[0] ? p[0] : p[1] ? p[1] : p[W] ? p[W] : p[W + 1];
       framebuffer[(PREVIEW_Y + y) * W + PREVIEW_X + x] = c;
     }
+  pthread_mutex_unlock(&preview_lock);
   // A frame in palette color 1 sets the picture off from the menu.
   for (int x = PREVIEW_X - 1; x <= PREVIEW_X + W / 2; x++)
     framebuffer[(PREVIEW_Y - 1) * W + x] = framebuffer[(PREVIEW_Y + H / 2) * W + x] = 1;
@@ -1778,6 +1775,7 @@ int main(int argc, char **argv) {
       }
       if (call_frame(ctx, mask)) printf("%s\n", take_error(ctx));
       else preview_frame();
+      if (preview_running) usleep(16667);  // the preview runs in real time
     }
     JS_FreeValue(ctx, bot);
     write_ppm(o.menu_dump);

@@ -63,7 +63,7 @@ Select `ARCADE` in the menu and press A (Wi-Fi needed; the last list is kept for
 - A shows a game with a live preview of its title screen; left/right go to the previous or next game.
 - A again saves it to `playload/games/`; once saved, A plays it, and you come back to the same game afterwards. B goes back.
 
-Titles and names the font cannot draw (most kanji) are shown by their screenshot or account name instead. A very heavy game keeps its first frame as the preview.
+Titles and names the font cannot draw (most kanji) are shown by their screenshot or account name instead. Very heavy games run slower in the preview.
 
 ### By hand
 
