@@ -18,13 +18,22 @@ export function createEngine(presets = [], compileScore = (s) => s) {
     height = 144,
     columns = 20,
     lines = 18;
-  const pixels = new Uint8Array(width * height);
+  const pixels = new Uint8Array(width * height),
+    glitches = new Uint8Array(width * height);
   const characters = Object.create(null),
     sprites = [],
-    cache = new Map();
+    cache = new Map(),
+    patterns = new WeakMap(),
+    modifiedPcg = new Set();
   const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
+  // Capture before game code can replace Math.random().
+  const random = Math.random;
   let held = 0,
     pressed = 0,
+    pcgBytes = 0,
+    firstFrame = true,
+    spriteOverflow = false,
+    pcgOverflow = false,
     sounds = [];
   const color = (col) => {
     if (!Number.isInteger(col) || col < 0 || col > 7) throw new RangeError('Color must be 0–7');
@@ -57,15 +66,39 @@ export function createEngine(presets = [], compileScore = (s) => s) {
     return 1 << id;
   };
 
+  function randomNoise(range) {
+    return (random() * range) | 0;
+  }
+
+  function glitch(x, y, w, h) {
+    const mask = [3, 4, 6, 7][randomNoise(4)];
+    for (let row = 0; row < h; row++) {
+      const py = y + row;
+      for (let col = 0; col < w; col++) {
+        const px = x + col;
+        if (randomNoise(4) && px >= 0 && px < width && py >= 0 && py < height)
+          glitches[py * width + px] ^= mask;
+      }
+    }
+  }
+
+  function glitchSprite(x, y) {
+    spriteOverflow = true;
+    glitch(x + randomNoise(33) - 16, y + randomNoise(33) - 16, 8, 8);
+  }
+
   // Character data
 
-  function colorPair(initial, inherit = false) {
+  function colorPair(initial, inherit = false, owner = null) {
     const validate = (value) => (inherit && value == null ? null : color(value));
     const values = initial.map(validate);
     const pair = new Proxy(values, {
       set(target, index, value) {
         if (index !== '0' && index !== '1') throw new RangeError('Colors have two entries');
-        target[index] = validate(value);
+        const next = target.slice();
+        next[index] = validate(value);
+        if (owner) writePcg(owner, target, next, Number(index), Number(index) + 1);
+        else target[index] = next[index];
         return true;
       },
       deleteProperty() {
@@ -82,19 +115,138 @@ export function createEngine(presets = [], compileScore = (s) => s) {
         if (!Array.isArray(value) || value.length !== 2)
           throw new TypeError('Colors need [col1, col2]');
         const next = Array.from(value, validate);
-        values[0] = next[0];
-        values[1] = next[1];
+        if (next.length !== 2) throw new TypeError('Colors need [col1, col2]');
+        if (owner) writePcg(owner, values, next);
+        else {
+          values[0] = next[0];
+          values[1] = next[1];
+        }
       },
     };
   }
 
+  // Count writes, including unchanged bytes. A bulk edit uses the remaining
+  // budget before dropping its excess bytes. Patterns and colors share both limits.
+  // The first accepted write reserves a character for the rest of this run.
+  function writePcg(owner, target, next, start = 0, end = next.length) {
+    const length = Math.max(0, end - start),
+      count =
+        modifiedPcg.has(owner) || modifiedPcg.size < 256 ? Math.min(length, 256 - pcgBytes) : 0;
+    if (count) modifiedPcg.add(owner);
+    for (let i = start; i < start + count; i++) target[i] = next[i];
+    pcgBytes += count;
+    if (count < length) pcgOverflow = true;
+    for (let i = count; i < length; i++) glitch(0, randomNoise(height), width, 1);
+  }
+
+  const integer = (value) => Math.trunc(+value) || 0;
+
+  const arrayIndex = (value, length) => {
+    const index = integer(value);
+    return index < 0 ? Math.max(length + index, 0) : Math.min(index, length);
+  };
+
+  // Saved references and subarrays share the byte budget. Rendering reads the
+  // private bytes directly; only the range written by each method is copied back.
+  function patternView(pattern, owner) {
+    const mutators = ['set', 'fill', 'copyWithin', 'reverse', 'sort'];
+    const view = new Proxy(pattern, {
+      get(target, key) {
+        // Exposing the backing buffer would allow writes outside the budget.
+        if (key === 'buffer') return target.buffer.slice(0);
+        if (key === 'subarray') return (...args) => patternView(target.subarray(...args), owner);
+        const value = Reflect.get(target, key, target);
+        if (typeof value !== 'function' || key === 'constructor') return value;
+        return (...args) => {
+          if (mutators.includes(key)) {
+            const next = target.slice();
+            let start = 0,
+              end = target.length;
+            if (key === 'set') {
+              start = integer(args[1]);
+              args[1] = start;
+              // Let the native method validate the source and offset. Capture
+              // its length once, including array-like sources with getters.
+              if (args[0] != null) {
+                const source = Object(args[0]);
+                args[0] = new Proxy(
+                  {},
+                  {
+                    get(_, name) {
+                      const value = Reflect.get(source, name, source);
+                      if (name !== 'length') return value;
+                      const length = Math.min(Math.max(integer(value), 0), Number.MAX_SAFE_INTEGER);
+                      end = start + length;
+                      return length;
+                    },
+                  },
+                );
+              }
+            } else if (key === 'fill') {
+              args[0] = +args[0];
+              start = arrayIndex(args[1], target.length);
+              end = args[2] === undefined ? target.length : arrayIndex(args[2], target.length);
+              args[1] = start;
+              args[2] = end;
+            } else if (key === 'copyWithin') {
+              start = arrayIndex(args[0], target.length);
+              const from = arrayIndex(args[1], target.length),
+                to = args[2] === undefined ? target.length : arrayIndex(args[2], target.length);
+              end = start + Math.max(0, Math.min(to - from, target.length - start));
+              args = [start, from, to];
+            }
+            const result = value.apply(next, args);
+            if (key === 'reverse') {
+              // Reverse writes both ends of each pair, but not an odd middle byte.
+              for (let i = 0; i < Math.floor(target.length / 2); i++) {
+                writePcg(owner, target, next, i, i + 1);
+                writePcg(owner, target, next, target.length - i - 1, target.length - i);
+              }
+            } else writePcg(owner, target, next, start, end);
+            return result === next ? view : result;
+          }
+          // Array callbacks must receive the guarded view as their array argument.
+          if (typeof args[0] === 'function') {
+            const callback = args[0];
+            args[0] = function (...values) {
+              return callback.apply(
+                this,
+                values.map((item) => (item === target ? view : item)),
+              );
+            };
+          }
+          const result = value.apply(target, args);
+          return result === target ? view : result;
+        };
+      },
+      set(target, key, value) {
+        const next = target.slice();
+        const result = Reflect.set(next, key, value);
+        if (result && Object.hasOwn(target, key))
+          writePcg(owner, target, next, Number(key), Number(key) + 1);
+        return result;
+      },
+      defineProperty(target, key, descriptor) {
+        const next = target.slice();
+        const result = Reflect.defineProperty(next, key, descriptor);
+        if (result && Object.hasOwn(target, key) && Object.hasOwn(descriptor, 'value'))
+          writePcg(owner, target, next, Number(key), Number(key) + 1);
+        return result;
+      },
+    });
+    return view;
+  }
+
   class PcgElem {
     constructor(rows = new Uint8Array(8), col = [7, 0]) {
-      const pattern = new Uint8Array(rows);
+      const pattern = new Uint8Array(rows),
+        owner = this;
+      patterns.set(this, pattern);
+      const view = patternView(pattern, owner);
       Object.defineProperties(this, {
         pat: {
           enumerable: true,
-          get: () => pattern,
+          get: () => view,
           set(value) {
             if (typeof value === 'string') {
               if (!/^[0-9a-f]{16}$/i.test(value))
@@ -103,17 +255,18 @@ export function createEngine(presets = [], compileScore = (s) => s) {
                 parseInt(value.slice(i * 2, i * 2 + 2), 16),
               );
             }
+            if (!value || value.length !== 8) throw new TypeError('Pattern needs 8 row bytes');
+            const next = Array.from(value);
             if (
-              !value ||
-              value.length !== 8 ||
-              !Array.from(value).every((v) => Number.isInteger(v) && v >= 0 && v <= 255)
+              next.length !== 8 ||
+              !next.every((v) => Number.isInteger(v) && v >= 0 && v <= 255)
             ) {
               throw new TypeError('Pattern needs 8 row bytes');
             }
-            pattern.set(value);
+            writePcg(owner, pattern, next);
           },
         },
-        col: colorPair(col),
+        col: colorPair(col, false, owner),
       });
       Object.preventExtensions(this);
     }
@@ -229,7 +382,8 @@ export function createEngine(presets = [], compileScore = (s) => s) {
       str !== '\r' &&
       str !== '\n'
     ) {
-      sprites.push({ x, y, chr: characterKey(str), col });
+      if (sprites.length < 128) sprites.push({ x, y, chr: characterKey(str), col });
+      else glitchSprite(x, y);
       return;
     }
 
@@ -241,7 +395,8 @@ export function createEngine(presets = [], compileScore = (s) => s) {
           y += 8;
           continue;
         }
-        sprites.push({ x, y, chr: characterKey(segment), col });
+        if (sprites.length < 128) sprites.push({ x, y, chr: characterKey(segment), col });
+        else glitchSprite(x, y);
         x += 8;
       }
     } catch (error) {
@@ -267,7 +422,7 @@ export function createEngine(presets = [], compileScore = (s) => s) {
   // Rasterization
 
   function draw(chr, x, y, col1, col2) {
-    const pattern = lookup(chr).pat;
+    const pattern = patterns.get(lookup(chr));
     for (let row = 0; row < 8; row++) {
       const py = y + row;
       if (py < 0 || py >= height) continue;
@@ -297,6 +452,8 @@ export function createEngine(presets = [], compileScore = (s) => s) {
     for (const sprite of sprites) {
       draw(sprite.chr, sprite.x, sprite.y, sprite.col, null);
     }
+    if (spriteOverflow || pcgOverflow)
+      for (let i = 0; i < pixels.length; i++) pixels[i] ^= glitches[i];
     return pixels;
   }
 
@@ -321,12 +478,21 @@ export function createEngine(presets = [], compileScore = (s) => s) {
       held = mask;
     },
     step(tick) {
+      // Setup overflow belongs to the first frame, just like its PCG writes.
+      if (!firstFrame && (spriteOverflow || pcgOverflow)) {
+        glitches.fill(0);
+        spriteOverflow = pcgOverflow = false;
+      }
+      firstFrame = false;
       sprites.length = 0;
       try {
         tick();
       } finally {
         pressed = 0;
+        // Top-level setup shares the first frame's budget, as sound commands do.
+        pcgBytes = 0;
       }
+      return Number(spriteOverflow) + Number(pcgOverflow);
     },
     sounds() {
       const result = sounds;

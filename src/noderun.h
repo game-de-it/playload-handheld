@@ -6,6 +6,7 @@ typedef struct {
   pid_t pid;
   int to, from;
   char error[2048];
+  int delay;  // frames the last tick asked to wait (Playload 0.9.4+)
 } NodeGame;
 
 typedef void (*NodeSoundFn)(void *user, int ch, const double *events, int count, int fixed);

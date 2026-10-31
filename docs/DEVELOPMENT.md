@@ -41,7 +41,7 @@ Ticks run on a fixed 60 Hz accumulator; after a stall of more than five ticks th
 
 | Path | Contents |
 |---|---|
-| `src/player.c` | Main program: options, game list and menu, config, QuickJS host, sessions, input, headless mode, engine updater |
+| `src/player.c` | Main program: options, game list, config, QuickJS host, sessions, input, headless mode, engine updater, Arcade (list, saving, preview) |
 | `src/noderun.c` | Node.js child process: start, request/reply protocol, timeouts |
 | `src/video.c` | OpenGL ES presenter: flat view, CRT shader (built from Playload's `crt.js`), diagnostics |
 | `src/ay.c` | AY-3-8910 model ported from Playload's `sound.js` |
@@ -49,6 +49,7 @@ Ticks run on a fixed 60 Hz accumulator; after a stall of more than five ticks th
 | `js/playload/` | Playload's `engine.js`, `sound.js`, `glyphs.js`, `crt.js` — unmodified; `VERSION` records the upstream commit |
 | `js/patch.js` | QuickJS: load-time patches, `Intl.Segmenter` replacement, caches, `console` |
 | `js/host.js` | QuickJS: glue between the player and Playload's engine |
+| `js/menu.js` | The menu, itself a Playload game (main view, Arcade list and game views) |
 | `js/node-host.mjs` | Node.js: game host, load-time patches, screen/sound serialization |
 | `port/` | `Playload.sh` (PortMaster launch script) and bundled games |
 | `vendor/` | QuickJS-ng amalgamation, SDL 2 headers and a link-time copy of `libSDL2` |
@@ -90,7 +91,9 @@ Environment overrides: `PLAYLOAD_BUTTONS`, `PLAYLOAD_CRT`, `PLAYLOAD_FPS`, `PLAY
 
 ### The menu
 
-The menu is itself a Playload game (`menu_source` in `player.c`) run by QuickJS. It talks to the player through `__native`: `launch(i)`, `layout(v)`, `crt(v)`, `runtime(v)`, `engine(name)`, `update()`. Each game then runs in a fresh JavaScript runtime, so nothing leaks between games.
+The menu is itself a Playload game (`js/menu.js`, embedded like the engine files) run by QuickJS. It talks to the player through `__native`: `launch(i)`, `layout(v)`, `crt(v)`, `runtime(v)`, `engine(name)`, `update()`, and for Arcade `arcade(cachedOnly)`, `payloads()`, `save(name, url)`, `preview(url)`, `state(s)`. Each game then runs in a fresh JavaScript runtime, so nothing leaks between games.
+
+**Arcade.** The list is Playload's `data/arcade.json` (title, author, author URL, game URL, screenshot path), downloaded from `raw.githubusercontent.com/kitao/playload/main/` with the updater's `curl` and kept in `arcade/arcade.json` for offline use; no HTML is scraped. Games are saved as `games/<screenshot name>.url` holding the full URL (relative URLs get `https://kitao.dev`); an existing file is never overwritten. A game counts as saved when any file in `games/` holds the same `#v1.` payload as its `url` or `originalUrl`. The preview runs the game in a second, silent QuickJS runtime, one tick per menu tick with no input, and draws it halved (first non-black pixel of each 2×2 block) at (40, 24) after the menu's frame; a tick over 40 ms (too heavy to keep the menu responsive) freezes it on that frame. The font has kana but few kanji, so titles and author names with characters whose glyph is empty fall back to the screenshot name or X account (`drawable()` checks `pcg[c].pat`). Playing a saved game from Arcade stores `arcade <index>` with `state()`, and the menu reopens that game afterwards from the cached list.
 
 ### Runtimes
 
@@ -103,11 +106,11 @@ Requests on the child's fd 3: `'F' <mask>` (run one tick) and `'Q'` (quit). Repl
 
 | Reply | Body |
 |---|---|
-| `R` | screen description: 360 cells × (8 pattern rows, ink, paper); u16 pattern count + 8 rows each; u32 sprite count; then columns `x i16[]`, `y i16[]`, `pattern u16[]`, `col u8[]` (on-screen sprites only); then sounds |
-| `F` | 23,040 palette indices (Playload's own renderer, used if the render patch cannot be applied); then sounds |
+| `R` | screen description: 360 cells × (8 pattern rows, ink, paper); u16 pattern count + 8 rows each; u32 sprite count; then columns `x i16[]`, `y i16[]`, `pattern u16[]`, `col u8[]` (on-screen sprites only); then sounds; then the trailer |
+| `F` | 23,040 palette indices (Playload's own renderer, used if the render patch cannot be applied); then sounds; then the trailer |
 | `E` | UTF-8 error message (the player shows it on the error screen) |
 
-Sounds: u16 count, then per sound u8 channel, u8 fixed-volume flag, u32 event count and f64 `[op, a, b]` triplets. The first reply (after the game's top-level code and first tick) is sent unrequested. A reply has 15 s at start and 3 s per tick before the game counts as not responding. stdout and stderr go to `log.txt`.
+Sounds: u16 count, then per sound u8 channel, u8 fixed-volume flag, u32 event count and f64 `[op, a, b]` triplets. Trailer: u8 frames to wait after this tick and u8 noise flag, followed for `R` replies with the flag set by 23,040 bytes of overflow noise to XOR over the frame (Playload 0.9.4+, see below). The first reply (after the game's top-level code and first tick) is sent unrequested. A reply has 15 s at start and 3 s per tick before the game counts as not responding. stdout and stderr go to `log.txt`.
 
 ### Engine versions and the in-app updater
 
@@ -124,6 +127,7 @@ Playload's files are never edited on disk; they are adapted when loaded. Optiona
 | Patch | Runtime | Required | Why |
 |---|---|---|---|
 | `render()` → native rasterizer (screen cells + sprites) | both | QuickJS: yes; Node.js: no (falls back to Playload's renderer) | Playload rasterizes every pixel in JS: 22–24 ms per frame in QuickJS, 23 ms for 10,000 sprites in Node.js on RK3566. Since 0.9.3, `pcg[chr].pat` is a Proxy that counts edits; the native renderer reads the engine's private `patterns` WeakMap instead (reading the Proxy made BRR 3KB about 3× slower in QuickJS) |
+| `render()` also passes the overflow noise (`glitches`) on frames over the sprite or PCG limit; the native side XORs it over the frame | both | no (absent before 0.9.4) | Playload 0.9.4 shows overflow as noise. `step()`'s return value (frames to wait, one per exceeded limit) is honored in sessions with a sleep, as the browser player waits; sound keeps playing and the 60 Hz schedule catches up |
 | `characterKey()` memoized (throws are not cached) | both | no | Every `spr()`/`put()` normalizes, matches and segments its string |
 | `Intl.Segmenter` results cached per string | both | — | QuickJS has no `Intl` (replaced by an approximation); in Node.js, ICU segmentation dominated `put()`-heavy games |
 | `String.prototype.normalize` cached | QuickJS | — | Same strings every tick |
@@ -191,7 +195,7 @@ Verification used for releases: frames identical to Playload's engine at several
 ## Updating the built-in Playload
 
 1. Copy `src/engine/engine.js`, `sound.js`, `glyphs.js` and `src/app/crt.js` of the new tag into `js/playload/` and update `js/playload/VERSION`.
-2. Check that the patch anchors still exist (`function render() {`, `const characterKey = (chr) => {`, `const pair = new Proxy(values, {`, the shader template literals and `vec3 fetch(vec2 pixel) {`).
+2. Check that the patch anchors still exist (`function render() {` with the `patterns`, `glitches`, `spriteOverflow` and `pcgOverflow` names it passes, `const characterKey = (chr) => {`, `const pair = new Proxy(values, {`, the shader template literals and `vec3 fetch(vec2 pixel) {`).
 3. Compare the AY code in `sound.js` and the shader in `crt.js` with the previous version; port any change to `src/ay.c` / `src/video.c`.
 4. Run the verification above, then `tools/package.sh`.
 

@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
+#include <unistd.h>
 #include <strings.h>
 #include <ctype.h>
 #include <time.h>
@@ -37,7 +38,7 @@
 #include "video.h"
 #endif
 
-#define PLAYLOAD_HANDHELD_VERSION "1.0.2"
+#define PLAYLOAD_HANDHELD_VERSION "1.1.0"
 #define W 160
 #define H 144
 
@@ -51,7 +52,9 @@ static const uint32_t palette[8] = {0x000000, 0x55415f, 0x646964, 0xd77355,
 static uint8_t framebuffer[W * H];
 static long raster_calls;  // counts frames drawn natively (the updater's self-test checks it)
 
-static void raster(const uint8_t *cells, const int32_t *pos, const uint8_t *pat, int sprites) {
+// glitch: Playload 0.9.4's overflow noise, XORed over the frame (NULL: none).
+static void raster(const uint8_t *cells, const int32_t *pos, const uint8_t *pat, int sprites,
+                   const uint8_t *glitch) {
   raster_calls++;
   for (int cy = 0; cy < 18; cy++)
     for (int cx = 0; cx < 20; cx++) {
@@ -77,6 +80,8 @@ static void raster(const uint8_t *cells, const int32_t *pos, const uint8_t *pat,
       }
     }
   }
+  if (glitch)
+    for (int i = 0; i < W * H; i++) framebuffer[i] ^= glitch[i] & 7;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +148,10 @@ static JSValue js_raster(JSContext *ctx, JSValueConst this_val, int argc, JSValu
   if (!cells || !pos || !pat) return JS_EXCEPTION;
   if (cell_bytes < 3600 || n < 0 || (size_t)n * 12 > pos_bytes || (size_t)n * 8 > pat_bytes)
     return JS_ThrowRangeError(ctx, "bad raster input");
-  raster(cells, pos, pat, n);
+  size_t glitch_bytes = 0;
+  const uint8_t *glitch = argc > 4 && JS_IsObject(argv[4]) ? typed_pointer(ctx, argv[4], &glitch_bytes) : NULL;
+  if (glitch && glitch_bytes < W * H) return JS_ThrowRangeError(ctx, "bad raster input");
+  raster(cells, pos, pat, n, glitch);
   return JS_UNDEFINED;
 }
 
@@ -182,7 +190,7 @@ static void node_raster(uint8_t *pixels, const uint8_t *cells, const uint8_t *pa
     memcpy(pat + n * 8, patterns + id * 8, 8);
     n++;
   }
-  raster(cells, pos, pat, n);
+  raster(cells, pos, pat, n, NULL);  // noise comes separately, see node_read_frame
   if (pixels != framebuffer) memcpy(pixels, framebuffer, sizeof framebuffer);
 }
 
@@ -307,6 +315,11 @@ static JSValue js_crt(JSContext *ctx, JSValueConst this_val, int argc, JSValueCo
 static JSValue js_runtime(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_engine(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_update(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_arcade(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_payloads(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_save(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_preview(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_state(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 
 static int setup_js(JSContext *ctx) {
   JSValue global = JS_GetGlobalObject(ctx);
@@ -319,6 +332,11 @@ static int setup_js(JSContext *ctx) {
   JS_SetPropertyStr(ctx, native, "layout", JS_NewCFunction(ctx, js_layout, "layout", 1));
   JS_SetPropertyStr(ctx, native, "crt", JS_NewCFunction(ctx, js_crt, "crt", 1));
   JS_SetPropertyStr(ctx, native, "runtime", JS_NewCFunction(ctx, js_runtime, "runtime", 1));
+  JS_SetPropertyStr(ctx, native, "arcade", JS_NewCFunction(ctx, js_arcade, "arcade", 1));
+  JS_SetPropertyStr(ctx, native, "payloads", JS_NewCFunction(ctx, js_payloads, "payloads", 0));
+  JS_SetPropertyStr(ctx, native, "save", JS_NewCFunction(ctx, js_save, "save", 2));
+  JS_SetPropertyStr(ctx, native, "preview", JS_NewCFunction(ctx, js_preview, "preview", 1));
+  JS_SetPropertyStr(ctx, native, "state", JS_NewCFunction(ctx, js_state, "state", 1));
   JS_SetPropertyStr(ctx, global, "__native", native);
   JS_SetPropertyStr(ctx, global, "print", JS_NewCFunction(ctx, js_print, "print", 1));  // console.*
   size_t patch_len;
@@ -352,12 +370,22 @@ static int setup_js(JSContext *ctx) {
   return 0;
 }
 
+// Frames the last tick asked to wait (Playload 0.9.4+: one per exceeded limit).
+static int tick_delay;
+
+static void take_delay(JSContext *ctx, JSValue r) {
+  int32_t d = 0;
+  if (JS_IsNumber(r)) JS_ToInt32(ctx, &d, r);
+  tick_delay = d > 0 && d < 10 ? d : 0;
+}
+
 static int call_start(JSContext *ctx, const char *source, const char *inject) {
   JSValue args[2] = {JS_NewString(ctx, source), JS_NewString(ctx, inject ? inject : "")};
   JSValue r = JS_Call(ctx, start_fn, JS_UNDEFINED, 2, args);
   JS_FreeValue(ctx, args[0]);
   JS_FreeValue(ctx, args[1]);
   if (JS_IsException(r)) return -1;
+  take_delay(ctx, r);
   JS_FreeValue(ctx, r);
   run_jobs(ctx);
   return 0;
@@ -367,6 +395,7 @@ static int call_frame(JSContext *ctx, int mask) {
   JSValue arg = JS_NewInt32(ctx, mask);
   JSValue r = JS_Call(ctx, frame_fn, JS_UNDEFINED, 1, &arg);
   if (JS_IsException(r)) return -1;
+  take_delay(ctx, r);
   JS_FreeValue(ctx, r);
   run_jobs(ctx);
   return 0;
@@ -422,6 +451,8 @@ static int b64(int c) {
   return -1;
 }
 
+static char *decode_game(char *text, char *err, size_t errlen);
+
 // Accepts a file containing a Playload URL (…#v1.<payload>) or plain JS source.
 static char *load_game(const char *path, char *err, size_t errlen) {
   size_t len;
@@ -430,6 +461,11 @@ static char *load_game(const char *path, char *err, size_t errlen) {
     snprintf(err, errlen, "cannot read %s", path);
     return NULL;
   }
+  return decode_game(text, err, errlen);
+}
+
+// Takes text holding a Playload URL or plain JS source (and frees it); returns the source.
+static char *decode_game(char *text, char *err, size_t errlen) {
   char *hash = strstr(text, "#v1.");
   int skip = 4;
   if (!hash && (hash = strstr(text, "#1."))) skip = 3;
@@ -556,8 +592,11 @@ static char *title_of(const char *path) {
   return strdup(buf);
 }
 
+static char games_dir[512];  // the directory given on the command line, if any
+
 static void find_games(const char *path) {
   DIR *d = opendir(path);
+  if (d) snprintf(games_dir, sizeof games_dir, "%s", path);
   if (!d) {
     game_paths[game_count] = strdup(path);
     game_titles[game_count++] = title_of(path);
@@ -576,85 +615,11 @@ static void find_games(const char *path) {
   for (int i = 0; i < game_count; i++) game_titles[i] = title_of(game_paths[i]);
 }
 
-// The menu is itself a Playload game; it calls __native.launch(i).
-// The menu is itself a Playload game. It opens on the game played last.
-// Up/down pick a game or a setting (held: repeat); on the game list
-// left/right turn a page. A plays a game or changes a setting; left/right
-// also change settings. ENGINE: A checks for a new Playload release,
-// left/right switch versions.
-static const char *menu_source =
-    "const T = globalThis.__titles, N = T.length, R = 7, K = 4;\n"
-    "let sel = Math.min(globalThis.__menuSel || 0, Math.max(N - 1, 0));\n"
-    "let top = Math.max(0, Math.min(sel - (R >> 1), N - R));\n"
-    "let msg = '', updating = 0, held = 0;\n"
-    "const cut = (s, n) => Array.from(s).slice(0, n).join('');\n"
-    "const settings = () => [\n"
-    "  'BUTTONS:' + ['NINTENDO', 'XBOX'][__native.layout()],\n"
-    "  'CRT:' + (__native.crt() ? 'ON' : 'OFF'),\n"
-    "  'ENGINE:' + cut(__native.engine().current, 10),\n"
-    "  'RUNTIME:' + (__native.runtime() ? 'NODE.JS' : 'QUICKJS'),\n"
-    "];\n"
-    "function draw() {\n"
-    "  cls(0);\n"
-    "  put(1, 1, 'PLAYLOAD', 6);\n"
-    "  if (N) {\n"
-    "    const pos = `${Math.min(sel, N - 1) + 1}/${N}`;\n"
-    "    put(19 - pos.length, 1, pos, sel < N ? 7 : 2);\n"
-    "  }\n"
-    "  put(1, 2, '-'.repeat(18), 1);\n"
-    "  if (!N) put(1, 4, 'NO GAMES IN games/', 3);\n"
-    "  for (let i = 0; i < R && top + i < N; i++) {\n"
-    "    const k = top + i;\n"
-    "    put(1, 4 + i, (k === sel ? '>' : ' ') + cut(T[k], 17), k === sel ? 7 : 2);\n"
-    "  }\n"
-    "  if (top > 0) put(19, 4, '↑', 2);\n"
-    "  if (top + R < N) put(19, 3 + R, '↓', 2);\n"
-    "  settings().forEach((s, i) =>\n"
-    "    put(1, 12 + i, (sel === N + i ? '>' : ' ') + s, sel === N + i ? 7 : 5));\n"
-    "  put(1, 16, cut(msg, 18), 6);\n"
-    "  put(1, 17, 'A OK  SEL+ST QUIT', 2);\n"
-    "}\n"
-    "function moveTo(next) {\n"
-    "  sel = next;\n"
-    "  if (sel < N && sel < top) top = sel;\n"
-    "  if (sel < N && sel >= top + R) top = sel - R + 1;\n"
-    "  draw();\n"
-    "  play(1, 'V8O6N1c');\n"
-    "}\n"
-    "draw();\n"
-    "function tick() {\n"
-    "  if (updating && --updating === 0) {\n"
-    "    msg = __native.update();\n"
-    "    draw();\n"
-    "    play(1, 'V8O5N1cgC');\n"
-    "    return;\n"
-    "  }\n"
-    "  // Up/down move one line, and repeat while held.\n"
-    "  const v = btn(1) - btn(0);\n"
-    "  held = v ? held + 1 : 0;\n"
-    "  if (v && (held === 1 || (held > 18 && held % 4 === 0)))\n"
-    "    moveTo((sel + v + N + K) % (N + K));\n"
-    "  // On the game list, left/right turn a page.\n"
-    "  const h = btnp(3) - btnp(2);\n"
-    "  if (h && sel < N) moveTo(Math.max(0, Math.min(N - 1, sel + h * R)));\n"
-    "  const change = btnp(4) || (sel >= N && h !== 0);\n"
-    "  if (sel === N && change) __native.layout(1 - __native.layout());\n"
-    "  if (sel === N + 1 && change) __native.crt(1 - __native.crt());\n"
-    "  if (sel === N + 3 && change) __native.runtime(1 - __native.runtime());\n"
-    "  if (sel === N + 2 && btnp(4)) {\n"
-    "    msg = 'UPDATING...';\n"
-    "    updating = 2;\n"
-    "  } else if (sel === N + 2 && h) {\n"
-    "    const { current, list } = __native.engine();\n"
-    "    const i = (list.indexOf(current) + (h > 0 ? 1 : list.length - 1)) % list.length;\n"
-    "    msg = 'USING ' + __native.engine(list[i]);\n"
-    "  }\n"
-    "  if (sel >= N && change) {\n"
-    "    draw();\n"
-    "    play(1, 'V8O5N1cg');\n"
-    "  }\n"
-    "  if (sel < N && btnp(4)) __native.launch(sel);\n"
-    "}\n";
+// The menu is js/menu.js, a Playload game embedded like the engine files.
+static const char *menu_source(void) {
+  size_t len;
+  return bundle_source("menu.js", &len);
+}
 
 static int pending_launch = -1;
 
@@ -757,11 +722,24 @@ static void set_titles(JSContext *ctx) {
   JSValue list = JS_NewArray(ctx);
   for (int i = 0; i < game_count; i++)
     JS_SetPropertyUint32(ctx, list, (uint32_t)i, JS_NewString(ctx, game_titles[i]));
+  // File names without extension: the menu shows them for titles the font cannot draw.
+  JSValue files = JS_NewArray(ctx);
+  for (int i = 0; i < game_count; i++) {
+    const char *base = strrchr(game_paths[i], '/');
+    base = base ? base + 1 : game_paths[i];
+    const char *dot = strrchr(base, '.');
+    JS_SetPropertyUint32(ctx, files, (uint32_t)i,
+                         JS_NewStringLen(ctx, base, dot ? (size_t)(dot - base) : strlen(base)));
+  }
   JSValue global = JS_GetGlobalObject(ctx);
   JS_SetPropertyStr(ctx, global, "__titles", list);
+  JS_SetPropertyStr(ctx, global, "__files", files);
   JS_SetPropertyStr(ctx, global, "__menuSel", JS_NewInt32(ctx, last_game));
   JS_FreeValue(ctx, global);
 }
+
+// Where the menu reopens after a game (see js/menu.js), kept across sessions.
+static char menu_state[64];
 
 // ---------------------------------------------------------------------------
 // One QuickJS runtime per game, so nothing leaks from one game into the next.
@@ -1108,6 +1086,197 @@ static JSValue js_update(JSContext *ctx, JSValueConst this_val, int argc, JSValu
   return JS_NewString(ctx, update_engine(msg, sizeof msg));
 }
 
+// ---------------------------------------------------------------------------
+// Playload Arcade: the curated gallery's list (data/arcade.json in Playload's
+// repository), saving its games into games/, and a live preview of a game.
+
+#define ARCADE_DIR "arcade"
+#define ARCADE_LIST ARCADE_DIR "/arcade.json"
+#define ARCADE_URL "https://raw.githubusercontent.com/kitao/playload/main/data/arcade.json"
+
+// __native.arcade(cachedOnly) -> {text, online}: downloads the list (kept for
+// offline use) unless cachedOnly; text is null when there is no list at all.
+static JSValue js_arcade(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+  int32_t cached_only = 0;
+  if (argc > 0) JS_ToInt32(ctx, &cached_only, argv[0]);
+  int online = 0;
+  if (!cached_only) {
+    char cmd[1024];
+    snprintf(cmd, sizeof cmd,
+             "mkdir -p " ARCADE_DIR " && %s -fsSL -m 20 -o " ARCADE_LIST ".new " ARCADE_URL
+             " && mv " ARCADE_LIST ".new " ARCADE_LIST,
+             curl_command());
+    online = run_capture(cmd, NULL, 0) == 0;
+    printf("arcade list %s\n", online ? "downloaded" : "not downloaded");
+  }
+  char *text = read_file(ARCADE_LIST, NULL);
+  JSValue result = JS_NewObject(ctx);
+  JS_SetPropertyStr(ctx, result, "text", text ? JS_NewString(ctx, text) : JS_NULL);
+  JS_SetPropertyStr(ctx, result, "online", JS_NewBool(ctx, online));
+  free(text);
+  return result;
+}
+
+// The #v1. payload of each game, by menu index ("" for plain JS files).
+static JSValue js_payloads(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+  JSValue list = JS_NewArray(ctx);
+  for (int i = 0; i < game_count; i++) {
+    char *text = read_file(game_paths[i], NULL);
+    const char *p = text ? strstr(text, "#v1.") : NULL;
+    size_t n = 0;
+    if (p)
+      while (b64((unsigned char)p[4 + n]) >= 0) n++;
+    JS_SetPropertyUint32(ctx, list, (uint32_t)i, JS_NewStringLen(ctx, p ? p + 4 : "", n));
+    free(text);
+  }
+  return list;
+}
+
+static void sort_games(void) {
+  for (int i = 0; i < game_count; i++) free(game_titles[i]);
+  qsort(game_paths, (size_t)game_count, sizeof *game_paths, cmp_str);
+  for (int i = 0; i < game_count; i++) game_titles[i] = title_of(game_paths[i]);
+}
+
+// __native.save(name, url) -> menu index of the new game in games/, or -1.
+// Refreshes __titles. An existing file of that name is kept (name-2.url, ...).
+static JSValue js_save(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+  const char *name = JS_ToCString(ctx, argv[0]), *url = JS_ToCString(ctx, argv[1]);
+  int index = -1;
+  char path[1024] = "";
+  if (name && url && games_dir[0] && valid_name(name, 60) && strstr(url, "#v1.") &&
+      game_count < MAX_GAMES) {
+    for (int k = 1; k < 100; k++) {
+      if (k == 1) snprintf(path, sizeof path, "%s/%s.url", games_dir, name);
+      else snprintf(path, sizeof path, "%s/%s-%d.url", games_dir, name, k);
+      if (access(path, F_OK) != 0) break;
+    }
+    FILE *f = fopen(path, "wbx");
+    if (f) {
+      const int ok = fprintf(f, "%s\n", url) > 0;
+      if (fclose(f) == 0 && ok) {
+        game_paths[game_count++] = strdup(path);
+        game_titles[game_count - 1] = NULL;
+        sort_games();
+        for (int i = 0; i < game_count; i++)
+          if (!strcmp(game_paths[i], path)) index = i;
+        set_titles(ctx);
+        printf("saved %s\n", path);
+      }
+    }
+  }
+  JS_FreeCString(ctx, name);
+  JS_FreeCString(ctx, url);
+  return JS_NewInt32(ctx, index);
+}
+
+static JSValue js_state(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+  if (argc > 0 && JS_IsString(argv[0])) {
+    const char *s = JS_ToCString(ctx, argv[0]);
+    if (s) snprintf(menu_state, sizeof menu_state, "%s", s);
+    JS_FreeCString(ctx, s);
+  }
+  return JS_NewString(ctx, menu_state);
+}
+
+// The preview runs the game silently in its own QuickJS runtime, one tick per
+// menu tick, and shows it at half size at (PREVIEW_X, PREVIEW_Y). A game too
+// heavy for that (a tick over PREVIEW_MS) stays on its last frame.
+#define PREVIEW_X 40
+#define PREVIEW_Y 24
+#define PREVIEW_MS 40
+static JSContext *preview_ctx;
+static JSValue preview_fns[3];
+static uint8_t preview_pixels[W * H];
+static int preview_ready, preview_frozen;
+
+// The JS entry points are globals of the player; swap the menu's and the preview's.
+static void swap_entry_points(void) {
+  const JSValue keep[3] = {start_fn, frame_fn, error_fn};
+  start_fn = preview_fns[0];
+  frame_fn = preview_fns[1];
+  error_fn = preview_fns[2];
+  memcpy(preview_fns, keep, sizeof keep);
+}
+
+static void preview_stop(void) {
+  if (!preview_ctx) return;
+  swap_entry_points();
+  vm_free(preview_ctx);  // frees the preview's entry points, now in the globals
+  start_fn = preview_fns[0];
+  frame_fn = preview_fns[1];
+  error_fn = preview_fns[2];
+  preview_ctx = NULL;
+  preview_ready = 0;
+}
+
+// Runs the preview's start (source given) or next tick, keeping the menu's picture.
+static void preview_tick(const char *source) {
+  static uint8_t menu[W * H];
+  memcpy(menu, framebuffer, sizeof menu);
+  swap_entry_points();
+  mute_sounds = 1;
+  const double t0 = now_ms();
+  const int failed = source ? call_start(preview_ctx, source, NULL) : call_frame(preview_ctx, 0);
+  const double ms = now_ms() - t0;
+  mute_sounds = 0;
+  swap_entry_points();
+  if (failed) {
+    printf("preview: %s\n", take_error(preview_ctx));
+    preview_frozen = 1;
+  } else {
+    memcpy(preview_pixels, framebuffer, sizeof preview_pixels);
+    preview_ready = 1;
+    if (ms > PREVIEW_MS) preview_frozen = 1;
+  }
+  memcpy(framebuffer, menu, sizeof menu);
+}
+
+// __native.preview(url): shows that game; "" stops the preview.
+static JSValue js_preview(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+  preview_stop();
+  const char *url = JS_ToCString(ctx, argv[0]);
+  if (url && url[0]) {
+    char err[128];
+    char *source = decode_game(strdup(url), err, sizeof err);
+    const JSValue menu[3] = {start_fn, frame_fn, error_fn};
+    JSContext *game = source ? vm_new(current_options) : NULL;
+    if (game) {
+      preview_fns[0] = start_fn;
+      preview_fns[1] = frame_fn;
+      preview_fns[2] = error_fn;
+      preview_ctx = game;
+      preview_frozen = 0;
+    }
+    start_fn = menu[0];
+    frame_fn = menu[1];
+    error_fn = menu[2];
+    if (game) preview_tick(source);
+    free(source);
+  }
+  JS_FreeCString(ctx, url);
+  return JS_UNDEFINED;
+}
+
+// Called after each menu tick: advances the preview and draws it over the menu,
+// halved (of each 2x2 block, the first non-black pixel, so thin lines survive).
+static void preview_frame(void) {
+  if (!preview_ctx) return;
+  if (!preview_frozen) preview_tick(NULL);
+  if (!preview_ready) return;
+  for (int y = 0; y < H / 2; y++)
+    for (int x = 0; x < W / 2; x++) {
+      const uint8_t *p = preview_pixels + y * 2 * W + x * 2;
+      const uint8_t c = p[0] ? p[0] : p[1] ? p[1] : p[W] ? p[W] : p[W + 1];
+      framebuffer[(PREVIEW_Y + y) * W + PREVIEW_X + x] = c;
+    }
+  // A frame in palette color 1 sets the picture off from the menu.
+  for (int x = PREVIEW_X - 1; x <= PREVIEW_X + W / 2; x++)
+    framebuffer[(PREVIEW_Y - 1) * W + x] = framebuffer[(PREVIEW_Y + H / 2) * W + x] = 1;
+  for (int y = PREVIEW_Y - 1; y <= PREVIEW_Y + H / 2; y++)
+    framebuffer[y * W + PREVIEW_X - 1] = framebuffer[y * W + PREVIEW_X + W / 2] = 1;
+}
+
 
 static int run_headless_node(Options *o, const char *game) {
   NodeGame node;
@@ -1426,8 +1595,15 @@ static int run_session(JSContext *ctx, const char *source, const char *load_erro
       } else if (call_frame(ctx, mask)) {
         show_error(ctx, take_error(ctx));
         failed = 1;
+      } else {
+        preview_frame();  // the menu's Arcade preview, if any
       }
       const double ms = now_ms() - a;
+      // Playload 0.9.4+ waits a frame per exceeded sprite/PCG limit, as its
+      // browser player does; sound keeps playing, and the 60 Hz schedule
+      // catches up afterwards.
+      const int wait = failed ? 0 : node_game ? node.delay : tick_delay;
+      if (wait) SDL_Delay((Uint32)(wait * 1000 / 60));
       osd_ticks++;
       osd_sum += ms;
       if (ms > osd_max) osd_max = ms;
@@ -1512,7 +1688,7 @@ static int run_sdl(Options *o) {
     char *source;
     if (current < 0) {
       set_titles(ctx);
-      source = strdup(menu_source);
+      source = strdup(menu_source());
     } else {
       source = load_game(game_paths[current], err, sizeof err);
       printf("playing %s\n", game_paths[current]);
@@ -1526,6 +1702,7 @@ static int run_sdl(Options *o) {
         run_session(ctx, source, err, inject, on_node ? game_paths[current] : NULL);
     free(inject);
     free(source);
+    preview_stop();
     vm_free(ctx);
     if (action == ACT_LAUNCH) {
       current = last_game = pending_launch;
@@ -1586,7 +1763,7 @@ int main(int argc, char **argv) {
     JSContext *ctx = vm_new(&o);
     set_titles(ctx);
     char *inject = o.inject_path ? read_file(o.inject_path, NULL) : NULL;
-    if (call_start(ctx, menu_source, inject)) printf("%s\n", take_error(ctx));
+    if (call_start(ctx, menu_source(), inject)) printf("%s\n", take_error(ctx));
     free(inject);
     // With --inject, __bot() supplies the buttons for --ticks frames.
     JSValue global = JS_GetGlobalObject(ctx), bot = JS_GetPropertyStr(ctx, global, "__bot");
@@ -1600,9 +1777,11 @@ int main(int argc, char **argv) {
         JS_FreeValue(ctx, m);
       }
       if (call_frame(ctx, mask)) printf("%s\n", take_error(ctx));
+      else preview_frame();
     }
     JS_FreeValue(ctx, bot);
     write_ppm(o.menu_dump);
+    preview_stop();
     vm_free(ctx);
     return 0;
   }

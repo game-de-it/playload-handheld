@@ -39,7 +39,7 @@ tick は 60Hz の固定ステップで進みます。5 tick 以上遅れたと�
 
 | パス | 内容 |
 |---|---|
-| `src/player.c` | 本体：オプション、ゲーム一覧とメニュー、設定、QuickJS のホスト、セッション、入力、画面なしモード、エンジンの更新 |
+| `src/player.c` | 本体：オプション、ゲーム一覧、設定、QuickJS のホスト、セッション、入力、画面なしモード、エンジンの更新、Arcade（一覧・保存・プレビュー） |
 | `src/noderun.c` | Node.js の子プロセス：起動、依頼／返信のやり取り、タイムアウト |
 | `src/video.c` | OpenGL ES の表示：通常表示、CRT シェーダー（本家 `crt.js` から作成）、診断機能 |
 | `src/ay.c` | 本家 `sound.js` から移植した AY-3-8910 のモデル |
@@ -47,6 +47,7 @@ tick は 60Hz の固定ステップで進みます。5 tick 以上遅れたと�
 | `js/playload/` | 本家の `engine.js`・`sound.js`・`glyphs.js`・`crt.js`（無改変）。`VERSION` に元のコミットを記録 |
 | `js/patch.js` | QuickJS 用：読み込み時の差し替え、`Intl.Segmenter` の代替、各種キャッシュ、`console` |
 | `js/host.js` | QuickJS 用：プレイヤーと本家エンジンをつなぐ部分 |
+| `js/menu.js` | メニュー。それ自体が Playload のゲーム（メイン画面、Arcade の一覧と詳細画面） |
 | `js/node-host.mjs` | Node.js 用：ゲームのホスト、読み込み時の差し替え、画面と音の送信 |
 | `port/` | `Playload.sh`（PortMaster の起動スクリプト）と同梱ゲーム |
 | `vendor/` | QuickJS-ng（amalgamation）、SDL 2 のヘッダ、リンク用の `libSDL2` |
@@ -88,7 +89,14 @@ Playload の6つのボタンをマスクに変換します（上 1、下 2、左
 
 ### メニュー
 
-メニューは、それ自体が QuickJS で動く Playload のゲームです（`player.c` の `menu_source`）。プレイヤーとは `__native` を通じてやり取りします：`launch(i)`、`layout(v)`、`crt(v)`、`runtime(v)`、`engine(name)`、`update()`。ゲームは1本ごとに新しい JavaScript 実行環境で動くので、前のゲームの状態は残りません。
+メニューは、それ自体が QuickJS で動く Playload のゲームです（`js/menu.js`。エンジンのファイルと同じように本体に埋め込みます）。プレイヤーとは `__native` を通じてやり取りします：`launch(i)`、`layout(v)`、`crt(v)`、`runtime(v)`、`engine(name)`、`update()`、Arcade 用に `arcade(cachedOnly)`、`payloads()`、`save(name, url)`、`preview(url)`、`state(s)`。ゲームは1本ごとに新しい JavaScript 実行環境で動くので、前のゲームの状態は残りません。
+
+**Arcade**
+- **一覧の取得**：本家の `data/arcade.json`（タイトル、作者、作者の URL、ゲームの URL、スクリーンショットのパス）を使います。更新機能と同じ `curl` で `raw.githubusercontent.com/kitao/playload/main/` から取得し、オフラインでも使えるように `arcade/arcade.json` に保存します。HTML の解析はしません。
+- **保存**：完全な URL を `games/<スクリーンショット名>.url` に書きます（相対 URL には `https://kitao.dev` を付けます）。同じ名前のファイルがあっても上書きしません。`games/` のどれかのファイルが `url` か `originalUrl` と同じ `#v1.` のデータを持っていれば、保存済みとみなします。
+- **プレビュー**：2つ目の無音の QuickJS 実行環境で、メニューの1 tick ごとに入力なしで1 tick ずつゲームを動かします。メニューの画面を描いた後、(40, 24) に半分の大きさで重ねます（2×2 の中で最初の黒以外の画素）。1 tick が 40ms を超えるゲームは、メニューの反応を保つため、そのフレームで止めます。
+- **描けない文字**：フォントはかなを含みますが、漢字はわずかです。形が空の文字を含むタイトルや作者名は、スクリーンショット名や X のアカウント名で表示します（`drawable()` が `pcg[c].pat` を調べます）。
+- **ゲームから戻るとき**：Arcade から保存済みのゲームを遊ぶと、`state()` に `arcade <番号>` を記録します。ゲームの後は、保存してある一覧からそのゲームの画面を開き直します。
 
 ### JS エンジン（RUNTIME）
 
@@ -101,11 +109,11 @@ Playload の6つのボタンをマスクに変換します（上 1、下 2、左
 
 | 返信 | 本体 |
 |---|---|
-| `R` | 画面の内容：360マス×（パターン8行、インク、ペーパー）、u16 のパターン数とパターン8行ずつ、u32 のスプライト数、続いて列ごとに `x i16[]`、`y i16[]`、`pattern u16[]`、`col u8[]`（画面にかかるスプライトのみ）。最後に音 |
-| `F` | パレット番号 23,040個（描画の差し替えができなかったときの本家描画）。最後に音 |
+| `R` | 画面の内容：360マス×（パターン8行、インク、ペーパー）、u16 のパターン数とパターン8行ずつ、u32 のスプライト数、続いて列ごとに `x i16[]`、`y i16[]`、`pattern u16[]`、`col u8[]`（画面にかかるスプライトのみ）。続いて音、最後に末尾データ |
+| `F` | パレット番号 23,040個（描画の差し替えができなかったときの本家描画）。続いて音、最後に末尾データ |
 | `E` | UTF-8 のエラーメッセージ（プレイヤーがエラー画面に表示） |
 
-音：u16 の個数、続いて1音ごとに u8 チャンネル、u8 固定音量フラグ、u32 のイベント数、f64 の `[op, a, b]` の並び。最初の返信（ゲームのトップレベルのコードと最初の tick の後）は、依頼なしで届きます。返信を待つ時間は、開始時 15秒、各 tick 3秒で、超えるとゲームが応答しないとみなします。標準出力と標準エラーは `log.txt` に入ります。
+音：u16 の個数、続いて1音ごとに u8 チャンネル、u8 固定音量フラグ、u32 のイベント数、f64 の `[op, a, b]` の並び。末尾データ：この tick の後に待つフレーム数（u8）とノイズの有無（u8）。`R` でノイズありのときは、続けて画面に XOR する上限超過のノイズ 23,040 バイト（Playload 0.9.4 以降、下記参照）。最初の返信（ゲームのトップレベルのコードと最初の tick の後）は、依頼なしで届きます。返信を待つ時間は、開始時 15秒、各 tick 3秒で、超えるとゲームが応答しないとみなします。標準出力と標準エラーは `log.txt` に入ります。
 
 ### エンジンの版とアプリ内更新
 
@@ -122,6 +130,7 @@ Playload の6つのボタンをマスクに変換します（上 1、下 2、左
 | 差し替え | 対象 | 必須か | 理由 |
 |---|---|---|---|
 | `render()` をネイティブのラスタライザ向けに（画面のマス＋スプライト） | 両方 | QuickJS：必須。Node.js：任意（できなければ本家の描画） | 本家は全画素を JS で塗る。RK3566 で QuickJS は 22〜24ms、Node.js は1万スプライトで 23ms。0.9.3 から `pcg[chr].pat` は書き換え回数を数える Proxy になったため、エンジン内部の `patterns`（WeakMap）から生のパターンを読む（Proxy 経由だと QuickJS で BRR 3KB が約3倍遅くなった） |
+| `render()` が、スプライトや PCG の上限を超えたフレームでノイズ（`glitches`）も渡し、ネイティブ側で画面に XOR する | 両方 | 任意（0.9.4 より前にはない） | 0.9.4 から、上限を超えるとノイズを表示する。`step()` の戻り値（待つフレーム数。超えた上限1つにつき1）は、ブラウザ版と同じようにセッション中に待つ。待つ間も音は鳴り続け、その後 60Hz の予定に追いつく |
 | `characterKey()` の結果を記憶（例外になる入力は記憶しない） | 両方 | 任意 | `spr()`／`put()` のたびに文字列の正規化・照合・区切りを行うため |
 | `Intl.Segmenter` の結果を文字列ごとにキャッシュ | 両方 | — | QuickJS には `Intl` がない（近似で代替）。Node.js では ICU の区切り処理が `put()` の多いゲームの大半を占めた |
 | `String.prototype.normalize` をキャッシュ | QuickJS | — | 毎 tick 同じ文字列のため |
@@ -189,7 +198,7 @@ tools/package.sh      # dist/playload-handheld-<バージョン>.zip
 ## 組み込みの Playload を更新するとき
 
 1. 新しいタグの `src/engine/engine.js`・`sound.js`・`glyphs.js`、`src/app/crt.js` を `js/playload/` にコピーし、`js/playload/VERSION` を更新する。
-2. 差し替えの目印が残っているか確認する（`function render() {`、`const characterKey = (chr) => {`、`const pair = new Proxy(values, {`、シェーダーのテンプレートリテラル、`vec3 fetch(vec2 pixel) {`）。
+2. 差し替えの目印が残っているか確認する（`function render() {` と、そこで渡す `patterns`・`glitches`・`spriteOverflow`・`pcgOverflow` の名前、`const characterKey = (chr) => {`、`const pair = new Proxy(values, {`、シェーダーのテンプレートリテラル、`vec3 fetch(vec2 pixel) {`）。
 3. `sound.js` の AY のコードと `crt.js` のシェーダーを前の版と比べ、変更があれば `src/ay.c`／`src/video.c` に反映する。
 4. 上記の確認を行い、`tools/package.sh` を実行する。
 

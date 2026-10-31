@@ -8,7 +8,7 @@ in `licenses/` (in the release archive: `playload/licenses/`).
 
 | Component | Where | License |
 |---|---|---|
-| [Playload](https://github.com/kitao/playload) by Takashi Kitao: `engine.js`, `sound.js`, `glyphs.js`, `crt.js` (unmodified copies of v0.9.2) | `js/playload/`, embedded in the player and copied to `node/builtin/` | MIT (`PLAYLOAD-LICENSE.txt`) |
+| [Playload](https://github.com/kitao/playload) by Takashi Kitao: `engine.js`, `sound.js`, `glyphs.js`, `crt.js` (unmodified copies of v0.9.4) | `js/playload/`, embedded in the player and copied to `node/builtin/` | MIT (`PLAYLOAD-LICENSE.txt`) |
 | Parts adapted from Playload: the AY-3-8910 model (`src/ay.c`, from `sound.js`), the Node.js/QuickJS hosts and the CRT shader setup (from `crt.js`) | `src/`, `js/` | MIT (`PLAYLOAD-LICENSE.txt`) |
 | [QuickJS-ng](https://github.com/quickjs-ng/quickjs) 0.17.0 by Fabrice Bellard, Charlie Gordon, Ben Noordhuis, Saúl Ibarra Corretgé and contributors | `vendor/quickjs/`, linked into the player | MIT (`QUICKJS-LICENSE.txt`) |
 | [SDL 2](https://www.libsdl.org/) headers (2.32.0) | `vendor/sdl2/include/`; the SDL library itself is provided by the device at run time | zlib (`vendor/sdl2/LICENSE.txt`) |

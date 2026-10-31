@@ -77,6 +77,8 @@ function functionRange(source, start) {
 // sprites to the native rasterizer (globalThis.__nativeRender, see host.js).
 // Since Playload 0.9.3, pcg[chr].pat is a Proxy that counts edits; the
 // renderer reads the engine's private pattern bytes (its patterns WeakMap).
+// Since 0.9.4, frames over the sprite or PCG limit get noise XORed over the
+// picture (its glitches buffer); the renderer gets it on those frames only.
 globalThis.__patchModule = (name, source) => {
   if (name !== 'engine.js') return source;
   // Optional speed-up: remember characterKey() results. Games pass the same
@@ -104,7 +106,8 @@ globalThis.__patchModule = (name, source) => {
   return (
     source.slice(0, range[0]) +
     'function render() {\n    return globalThis.__nativeRender(scr, sprites, lookup, pixels,\n' +
-      '      typeof patterns === "undefined" ? null : patterns);\n  }' +
+      '      typeof patterns === "undefined" ? null : patterns,\n' +
+      '      typeof glitches === "undefined" || !(spriteOverflow || pcgOverflow) ? null : glitches);\n  }' +
     source.slice(range[1])
   );
 };

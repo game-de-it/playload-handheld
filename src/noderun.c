@@ -173,6 +173,13 @@ int node_read_frame(NodeGame *g, uint8_t *pixels, NodeSoundFn on_sound, void *us
     if (on_sound) on_sound(user, ch, data, (int)events, fixed);
     free(data);
   }
+  // Trailer: <u8 frames to wait> <u8 noise> [160x144 noise to XOR, 'R' replies only].
+  g->delay = 0;
+  if (at + 2 <= len) {
+    g->delay = body[at] < 10 ? body[at] : 0;
+    if (body[at + 1] && header[0] == 'R' && at + 2 + 160 * 144 <= len)
+      for (int i = 0; i < 160 * 144; i++) pixels[i] ^= body[at + 2 + i] & 7;
+  }
   free(body);
   return 0;
 }

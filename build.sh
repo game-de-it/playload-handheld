@@ -4,7 +4,7 @@
 set -eu
 cd "$(dirname "$0")"
 mkdir -p build
-python3 tools/embed.py build/js_bundle.h js/patch.js js/host.js js/playload/engine.js js/playload/sound.js js/playload/glyphs.js js/playload/crt.js
+python3 tools/embed.py build/js_bundle.h js/patch.js js/host.js js/menu.js js/playload/engine.js js/playload/sound.js js/playload/glyphs.js js/playload/crt.js
 SRC="src/player.c src/noderun.c src/video.c src/ay.c src/inflate.c vendor/quickjs/quickjs-amalgam.c"
 CFLAGS="-O2 -std=gnu11 -Ibuild -Ivendor/quickjs -D_GNU_SOURCE -DNDEBUG -w"
 case "${1:-all}" in

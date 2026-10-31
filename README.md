@@ -19,6 +19,7 @@
 - Uses Playload's own engine, so games look and sound the same as in the browser (frames and audio verified identical).
 - Optional CRT view with Playload's own CRT shader.
 - Game menu that remembers the last game you played.
+- Browse [Playload Arcade](https://kitao.dev/playload/arcade/), the curated gallery, with a live preview of each game, and save games straight to the device (Wi-Fi).
 - Button layout for Nintendo-style or Xbox-style devices.
 - Updates the Playload engine from inside the app (Wi-Fi), with a self-test before switching.
 - Performance overlay (FPS, ticks per second, frame time).
@@ -54,6 +55,18 @@ To update, extract a newer zip over the old one. Your settings, games and downlo
 
 ## Adding games
 
+### From Playload Arcade (on the device)
+
+Select `ARCADE` in the menu and press A (Wi-Fi needed; the last list is kept for offline use).
+
+- The list shows the gallery's games, newest first. `*` marks games you already have.
+- A shows a game with a live preview of its title screen; left/right go to the previous or next game.
+- A again saves it to `playload/games/`; once saved, A plays it, and you come back to the same game afterwards. B goes back.
+
+Titles and names the font cannot draw (most kanji) are shown by their screenshot or account name instead. A very heavy game keeps its first frame as the preview.
+
+### By hand
+
 A Playload game *is* its URL. To add one:
 
 1. Open the game in a browser and copy the **full address** from the address bar. It starts with `https://kitao.dev/playload/app/#v1.` and is long.
@@ -68,8 +81,8 @@ The menu shows the game's own title (its `// @title` line), not the file name. P
 | Button | In games | In the menu |
 |---|---|---|
 | D-pad / left stick | Playload's arrows | Move (hold to repeat); left/right turn a page in the game list |
-| A | Playload's A | Play a game / change a setting |
-| B | Playload's B | — |
+| A | Playload's A | Play a game / change a setting / open Arcade, view or save a game |
+| B | Playload's B | Back (in Arcade) |
 | SELECT + START | Back to the menu | Quit |
 | SELECT + R1 | Toggle the CRT view | Toggle the CRT view |
 | SELECT + L1 | Toggle the performance overlay | Toggle the performance overlay |
@@ -82,6 +95,7 @@ The last rows of the menu are settings. Pick one with up/down and change it with
 
 | Setting | Values | |
 |---|---|---|
+| `ARCADE` | — | **A**: open Playload Arcade (see [Adding games](#adding-games)). |
 | `BUTTONS` | `NINTENDO` / `XBOX` | Swaps A and B. Pick the one that matches the labels on your device. |
 | `CRT` | `ON` / `OFF` | Playload's CRT view. Recommended off on RK3326 and A133P. |
 | `ENGINE` | `builtin` / downloaded versions | **A**: check GitHub for a newer Playload release, test it and switch to it. **Left/right**: switch between installed versions. |
@@ -108,6 +122,7 @@ playload/
 ├── games/                  your .url files
 ├── playload.cfg            settings (created on first change)
 ├── engine/<version>/       Playload engines downloaded by the in-app update
+├── arcade/arcade.json      the last Playload Arcade list
 ├── node/                   Node.js, its libraries, and the built-in engine
 ├── licenses/               license texts and third-party notices
 └── log.txt                 log of the last run (for troubleshooting)
@@ -116,7 +131,7 @@ playload/
 ## Troubleshooting
 
 - **A game shows ERROR**: the message on screen and `playload/log.txt` say why. Games made for a newer Playload may need a newer engine: select `ENGINE` and press A.
-- **Engine update says NO CONNECTION**: connect the device to Wi-Fi first.
+- **Engine update or Arcade says NO CONNECTION**: connect the device to Wi-Fi first.
 - **Low frame rate**: turn the CRT view off (SELECT + R1), and check that `RUNTIME` is `NODE.JS`.
 - **A and B are swapped**: change `BUTTONS` in the menu.
 

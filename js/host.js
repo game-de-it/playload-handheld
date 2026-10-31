@@ -15,7 +15,8 @@ let spritePos = new Int32Array(3 * 1024),
   spritePat = new Uint8Array(8 * 1024);
 
 // patterns: engine.js's element -> private pattern bytes (0.9.3+), or null.
-globalThis.__nativeRender = (scr, sprites, lookup, pixels, patterns) => {
+// glitches: overflow noise to XOR over the frame (0.9.4+), or null.
+globalThis.__nativeRender = (scr, sprites, lookup, pixels, patterns, glitches) => {
   const patOf = patterns ? (element) => patterns.get(element) : (element) => element.pat;
   let i = 0;
   for (const row of scr)
@@ -40,7 +41,7 @@ globalThis.__nativeRender = (scr, sprites, lookup, pixels, patterns) => {
     spritePat.set(patOf(lookup(sprite.chr)), n * 8);
     n++;
   }
-  native.raster(cells, spritePos, spritePat, n);
+  native.raster(cells, spritePos, spritePat, n, glitches);
   return pixels;
 };
 
@@ -81,16 +82,19 @@ globalThis.__start = (source, inject = '') => {
   )(...Object.values(api));
   if (!tick) throw new Error('Define function tick()');
   // As in the browser, the first tick runs right after the top-level code.
-  engine.step(tick);
+  const delay = engine.step(tick);
   emitSounds();
   engine.pixels;
+  return delay | 0;
 };
 
+// Returns the frames to wait after this tick (0.9.4+: 1 per exceeded limit).
 globalThis.__frame = (mask) => {
   engine.input(mask);
-  engine.step(tick);
+  const delay = engine.step(tick);
   emitSounds();
   engine.pixels;
+  return delay | 0;
 };
 
 // Shows an error on a fresh engine, so it works even if the game's state is broken.

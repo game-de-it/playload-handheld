@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.0
+
+- Playload Arcade in the menu: browse the curated gallery (Wi-Fi; the last list is kept for offline use), with a live preview of each game, and save games to `games/` or play saved ones.
+- Built-in Playload engine updated to v0.9.4, with the control symbols (⬆ ⬇ ⬅ ➡ Ⓐ Ⓑ) added in 0.9.3.
+- Playload 0.9.4's overflow feedback: noise over frames that exceed the sprite or PCG limits, and its one-frame waits, in both QuickJS and Node.js (Node.js output verified pixel-identical with Playload, noise included).
+- Titles the font cannot draw (most kanji) are shown by their file name in the menu.
+- The menu moved to `js/menu.js`.
+
 ## 1.0.2
 
 - Faster in-app engine update: the self-test now runs the API smoke test and up to six games (bundled games first) for at most about 1.5 seconds each, instead of every game for 300 ticks. On RK3566 with 13 games the update went from about 2 minutes to about 9 seconds.

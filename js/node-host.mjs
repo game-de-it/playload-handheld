@@ -12,6 +12,7 @@
 //                         <8 rows per pattern>, <u32 sprites>, then for the sprites:
 //                         <i16 x[]> <i16 y[]> <u16 pattern[]> <u8 col[]>
 //                 sounds: <u16 count>, per sound <u8 ch> <u8 fixed volume> <u32 events> <f64 [op, a, b] * events>
+//                 then <u8 frames to wait> <u8 noise> [<23040 noise bytes to XOR> if noise and 'R']
 //            'E' <u32 length> <utf-8 error message>
 // The first reply (after the game's top-level code and first tick) comes unrequested.
 // stdout and stderr (console.log, crashes) go to the port's log.txt.
@@ -119,7 +120,8 @@ async function importEngine() {
     let patched =
       source.slice(0, range[0]) +
       'function render() {\n    return globalThis.__nativeRender(scr, sprites, lookup, pixels,\n' +
-      '      typeof patterns === "undefined" ? null : patterns);\n  }' +
+      '      typeof patterns === "undefined" ? null : patterns,\n' +
+      '      typeof glitches === "undefined" || !(spriteOverflow || pcgOverflow) ? null : glitches);\n  }' +
       source.slice(range[1]);
     // Reading colors through colorPair's Proxy costs ~8 ms per frame for the 360
     // cells. Keep each pair's plain values array so the renderer can read it
@@ -185,7 +187,10 @@ let screen = null,
   spriteY = new Int16Array(spriteCapacity),
   spriteId = new Uint16Array(spriteCapacity),
   spriteCol = new Uint8Array(spriteCapacity);
-globalThis.__nativeRender = (scr, sprites, lookup, pixels, enginePatterns) => {
+let glitchBuffer = null,
+  delayFrames = 0;
+globalThis.__nativeRender = (scr, sprites, lookup, pixels, enginePatterns, glitches) => {
+  glitchBuffer = glitches;
   // Screen cells and their color pairs never change identity: resolve them once.
   if (!cellColors) cellColors = scr.flatMap((row) => row.map((element) => colorsOf(element.col)));
   lookupElement = lookup;
@@ -288,11 +293,14 @@ let stepStart = 0,
 function reply() {
   const renderStart = performance.now();
   screen = null;
+  glitchBuffer = null;
   const pixels = engine.pixels;
   const frame = screen ?? pixels;
+  // Playload's own renderer has already applied the noise.
+  const glitches = screen ? glitchBuffer : null;
   const renderEnd = performance.now();
   const sounds = engine.sounds();
-  let size = frame.length + 2;
+  let size = frame.length + 2 + 2 + (glitches ? glitches.length : 0);
   for (const { score } of sounds) size += 6 + score.code.length * 24;
   const out = Buffer.alloc(size);
   out.set(frame, 0);
@@ -308,6 +316,9 @@ function reply() {
     Buffer.from(flat.buffer, flat.byteOffset, flat.byteLength).copy(out, at);
     at += flat.byteLength;
   }
+  out[at++] = delayFrames;
+  out[at++] = glitches ? 1 : 0;
+  if (glitches) out.set(glitches, at);
   send(screen ? 'R' : 'F', out);
   if (profile) {
     profile.render += renderEnd - renderStart;
@@ -358,7 +369,7 @@ try {
   )(...Object.values(api));
   if (!tick) throw new Error('Define function tick()');
   // As in the browser, the first tick runs right after the top-level code.
-  engine.step(tick);
+  delayFrames = engine.step(tick) | 0;
   reply();
 } catch (error) {
   fail(error);
@@ -371,7 +382,7 @@ for (;;) {
   try {
     engine.input(mask);
     stepStart = performance.now();
-    engine.step(tick);
+    delayFrames = engine.step(tick) | 0;
     reply();
   } catch (error) {
     fail(error);
